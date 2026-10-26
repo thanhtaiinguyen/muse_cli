@@ -1,0 +1,770 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace Muse2Api;
+
+public enum AccountStatus { Active, Cooling, Invalid }
+
+public sealed class Account
+{
+    public string Id { get; set; } = "acc_" + Guid.NewGuid().ToString("N")[..10];
+    public string Label { get; set; } = "";
+    public bool Enabled { get; set; } = true;
+    public AccountStatus Status { get; set; } = AccountStatus.Active;
+    public Dictionary<string, string> Cookies { get; set; } = new();
+    public Dictionary<string, long> CookieExpires { get; set; } = new();
+    public double CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public double LastUsedAt { get; set; }
+    public double CooldownUntil { get; set; }
+    public string? LastError { get; set; }
+    public int SuccessCount { get; set; }
+    public int FailCount { get; set; }
+    public Dictionary<string, JsonNode?> Meta { get; set; } = new();
+
+    public bool IsAvailable(double now)
+    {
+        if (!Enabled || Status == AccountStatus.Invalid) return false;
+        if (Status == AccountStatus.Cooling) return now >= CooldownUntil;
+        return true;
+    }
+
+    public JsonObject Public()
+    {
+        var masked = new JsonObject();
+        foreach (var (k, v) in Cookies)
+            masked[k] = v.Length <= 8 ? "***" : $"{v[..4]}...{v[^4..]}";
+        var expires = new JsonObject();
+        foreach (var (k, v) in CookieExpires) expires[k] = v;
+        var meta = new JsonObject();
+        foreach (var (k, v) in Meta) meta[k] = v?.DeepClone();
+        return new JsonObject
+        {
+            ["id"] = Id, ["label"] = Label, ["enabled"] = Enabled,
+            ["status"] = Status.ToString().ToLowerInvariant(),
+            ["cookies"] = masked, ["cookie_expires"] = expires,
+            ["created_at"] = CreatedAt, ["last_used_at"] = LastUsedAt,
+            ["cooldown_until"] = CooldownUntil,
+            ["last_error"] = LastError is null ? null : JsonValue.Create(LastError),
+            ["success_count"] = SuccessCount, ["fail_count"] = FailCount, ["meta"] = meta,
+        };
+    }
+}
+
+public sealed class Lease : IDisposable
+{
+    public Account Account { get; }
+    public Exception? Error { get; set; }
+    private readonly AccountPool _pool;
+    private bool _released;
+    public Lease(AccountPool pool, Account account) { _pool = pool; Account = account; }
+    public void Fail(Exception ex) => Error = ex;
+    public void Dispose()
+    {
+        if (_released) return;
+        _released = true;
+        _pool.Release(Account, Error);
+    }
+}
+
+/// <summary>Account pool: scheduling, concurrency limits, cooldown and failover
+/// state, ported from Python <c>accounts/pool.py</c> (without async waiting:
+/// a busy pool fails fast with 503, as the Python pool does after its timeout).</summary>
+public sealed class AccountPool
+{
+    private readonly string _file;
+    private readonly Dictionary<string, Account> _accounts = new();
+    private readonly Dictionary<string, int> _inflight = new();
+    private readonly Dictionary<string, string> _affinity = new();
+    private long _roundRobin;
+    private readonly object _lock = new();
+
+    public string Strategy { get; }
+    public int MaxConcurrency { get; }
+    public double Cooldown { get; }
+    public double AcquireTimeout { get; }
+
+    public AccountPool(string file, string strategy = "affinity",
+        int maxConcurrency = 1, double cooldown = 120, double acquireTimeout = 60)
+    {
+        _file = file; Strategy = strategy; MaxConcurrency = Math.Max(1, maxConcurrency);
+        Cooldown = cooldown; AcquireTimeout = acquireTimeout;
+    }
+
+    public void Load()
+    {
+        if (!File.Exists(_file)) return;
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<Account>>(File.ReadAllText(_file)) ?? new();
+            lock (_lock) { foreach (var a in list) _accounts[a.Id] = a; }
+        }
+        catch { /* corrupted store starts empty, like Python */ }
+    }
+
+    public void Persist()
+    {
+        lock (_lock)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_file)) ?? ".");
+            var tmp = _file + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(_accounts.Values.ToList(),
+                new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, _file, overwrite: true);
+        }
+    }
+
+    public List<Account> All() { lock (_lock) return _accounts.Values.ToList(); }
+    public Account? Get(string id) { lock (_lock) return _accounts.GetValueOrDefault(id); }
+
+    public Account Upsert(Account acc)
+    {
+        lock (_lock) _accounts[acc.Id] = acc;
+        Persist();
+        return acc;
+    }
+
+    public bool Remove(string id)
+    {
+        bool removed;
+        lock (_lock) removed = _accounts.Remove(id);
+        if (removed) Persist();
+        return removed;
+    }
+
+    public Dictionary<string, int> Stats()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        lock (_lock) return new Dictionary<string, int>
+        {
+            ["total"] = _accounts.Count,
+            ["available"] = _accounts.Values.Count(a => a.IsAvailable(now)),
+            ["invalid"] = _accounts.Values.Count(a => a.Status == AccountStatus.Invalid),
+            ["inflight"] = _inflight.Values.Sum(),
+        };
+    }
+
+    private List<Account> Candidates(IReadOnlySet<string> exclude, string? kind)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        return _accounts.Values.Where(a =>
+            !exclude.Contains(a.Id) && a.Enabled && a.Status != AccountStatus.Invalid
+            && a.IsAvailable(now) && _inflight.GetValueOrDefault(a.Id) < MaxConcurrency).ToList();
+    }
+
+    public bool HasAlternative(IEnumerable<string> exclude)
+    {
+        var excluded = exclude.ToHashSet();
+        lock (_lock) return _accounts.Values.Any(a =>
+            !excluded.Contains(a.Id) && a.Enabled && a.Status != AccountStatus.Invalid);
+    }
+
+    public Lease Acquire(IEnumerable<string> exclude, string? hint, string? kind = null)
+    {
+        lock (_lock)
+        {
+            var free = Candidates(exclude.ToHashSet(), kind);
+            if (free.Count == 0) throw MuseException.NoAccount("no usable account in pool");
+            Account chosen;
+            if (Strategy == "round_robin")
+                chosen = free.OrderBy(a => a.Id).ToList()[(int)(Interlocked.Increment(ref _roundRobin) - 1) % free.Count];
+            else if (Strategy == "lru")
+                chosen = free.MinBy(a => a.LastUsedAt)!;
+            else // affinity, default
+            {
+                if (hint is not null && _affinity.TryGetValue(hint, out var id)
+                    && free.FirstOrDefault(a => a.Id == id) is { } pinned)
+                    chosen = pinned;
+                else
+                {
+                    chosen = free.MinBy(a => a.LastUsedAt)!;
+                    if (hint is not null) _affinity[hint] = chosen.Id;
+                }
+            }
+            _inflight[chosen.Id] = _inflight.GetValueOrDefault(chosen.Id) + 1;
+            chosen.LastUsedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return new Lease(this, chosen);
+        }
+    }
+
+    internal void Release(Account acc, Exception? error)
+    {
+        lock (_lock)
+        {
+            _inflight[acc.Id] = Math.Max(0, _inflight.GetValueOrDefault(acc.Id) - 1);
+            if (error is null)
+            {
+                acc.SuccessCount++;
+                acc.LastError = null;
+                if (acc.Status == AccountStatus.Cooling) acc.Status = AccountStatus.Active;
+            }
+            else
+            {
+                acc.FailCount++;
+                acc.LastError = error.Message[..Math.Min(500, error.Message.Length)];
+                var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (error is UpstreamException { Code: "upstream_auth_failed" })
+                    acc.Status = AccountStatus.Invalid;
+                else if (error is UpstreamException { Code: "upstream_quota_exhausted" })
+                {
+                    acc.Status = AccountStatus.Cooling;
+                    acc.CooldownUntil = now + Math.Max(Cooldown, 3600);
+                }
+                else if (error is UpstreamException { Retryable: true })
+                {
+                    acc.Status = AccountStatus.Cooling;
+                    acc.CooldownUntil = now + Cooldown;
+                }
+            }
+        }
+        Persist();
+    }
+
+    public void NoteWake(Account acc, Dictionary<string, string?> meta)
+    {
+        // Python note_wake: an unconfirmed VM wake blocks video for 600s.
+        if (meta.GetValueOrDefault("vm_wake_ok") is not { } ok) return;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (ok == "false")
+        {
+            var blocks = new JsonObject { ["video"] = now + 600 };
+            acc.Meta["kind_blocked_until"] = blocks;
+        }
+        else if (ok == "true")
+        {
+            acc.Meta.Remove("kind_blocked_until");
+        }
+    }
+}
+
+// ---------- API keys ----------
+public sealed class ApiKey
+{
+    public string Id { get; set; } = "key_" + Guid.NewGuid().ToString("N")[..10];
+    public string Name { get; set; } = "";
+    public string Prefix { get; set; } = "";
+    public string Hash { get; set; } = "";
+    public double CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public double LastUsedAt { get; set; }
+    public bool Revoked { get; set; }
+    public string Note { get; set; } = "";
+    public JsonObject Public() => new()
+    {
+        ["id"] = Id, ["name"] = Name, ["prefix"] = Prefix,
+        ["created_at"] = CreatedAt, ["last_used_at"] = LastUsedAt,
+        ["revoked"] = Revoked, ["note"] = Note,
+    };
+}
+
+public sealed class KeyStore
+{
+    private readonly string _file;
+    private readonly Dictionary<string, ApiKey> _keys = new();
+    private readonly object _lock = new();
+    private bool _dirty;
+
+    public KeyStore(string file) => _file = file;
+
+    public void Load()
+    {
+        if (!File.Exists(_file)) return;
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<ApiKey>>(File.ReadAllText(_file)) ?? new();
+            lock (_lock) { foreach (var k in list) _keys[k.Id] = k; }
+        }
+        catch { }
+    }
+
+    public List<ApiKey> All()
+    {
+        lock (_lock) return _keys.Values.OrderBy(k => k.CreatedAt).ToList();
+    }
+    public ApiKey? Get(string id) { lock (_lock) return _keys.GetValueOrDefault(id); }
+
+    public ApiKey? Verify(string provided)
+    {
+        if (string.IsNullOrEmpty(provided)) return null;
+        var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(provided))).ToLowerInvariant();
+        lock (_lock)
+        {
+            ApiKey? found = null;
+            foreach (var key in _keys.Values)
+                if (CryptographicOperations.FixedTimeEquals(
+                        Encoding.UTF8.GetBytes(digest), Encoding.UTF8.GetBytes(key.Hash))
+                    && !key.Revoked)
+                    found = key;
+            return found;
+        }
+    }
+
+    public void Touch(ApiKey key)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (now - key.LastUsedAt >= 1) { key.LastUsedAt = now; _dirty = true; }
+    }
+
+    public (ApiKey Key, string Plaintext) Create(string name, string note)
+    {
+        // Hex, not base64: base64 can lose characters when '+'/'/' are stripped,
+        // which made [..24] throw on some random keys (found by the test runner).
+        var plaintext = "m2a-" + Convert.ToHexString(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+        var key = new ApiKey
+        {
+            Name = name, Note = note, Prefix = plaintext[..8],
+            Hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(plaintext))).ToLowerInvariant(),
+        };
+        lock (_lock) _keys[key.Id] = key;
+        Save();
+        return (key, plaintext);
+    }
+
+    public bool Remove(string id)
+    {
+        bool removed;
+        lock (_lock) removed = _keys.Remove(id);
+        if (removed) Save();
+        return removed;
+    }
+
+    public void Save()
+    {
+        _dirty = false;
+        var dir = Path.GetDirectoryName(Path.GetFullPath(_file)) ?? ".";
+        Directory.CreateDirectory(dir);
+        var tmp = Path.Combine(dir, ".keys.tmp");
+        File.WriteAllText(tmp, JsonSerializer.Serialize(All(),
+            new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmp, _file, overwrite: true);
+    }
+
+    public void Flush() { if (_dirty) { try { Save(); } catch { _dirty = true; } } }
+}
+
+// ---------- Request log (SQLite, ported from Python services/request_log.py) ----------
+public sealed record RequestRecord(double Ts, string Method, string Path, string? Model,
+    string? KeyId, string? KeyName, string? AccountId, int StatusCode, long LatencyMs,
+    bool Stream, bool Poll, string? Error, string? ClientIp, string? TaskId);
+
+/// <summary>One SQLite row per /v1/* request, like Python.
+/// Same schema and indexes as Python (requests table, WAL, task_status/task_ms
+/// added columns), so /admin/requests, /admin/stats and /admin/metrics
+/// survive a gateway restart. One connection under a lock, like Python's
+/// threading.Lock around a shared sqlite3 connection. A failed write is
+/// logged and dropped, never surfaced to the client.</summary>
+public sealed class RequestLog : IDisposable
+{
+    private readonly string _file;
+    private readonly object _lock = new();
+    private Microsoft.Data.Sqlite.SqliteConnection? _conn;
+
+    public RequestLog(string file = ":memory:")
+    {
+        _file = file;
+        Open();
+    }
+
+    private void Open()
+    {
+        lock (_lock)
+        {
+            if (_file != ":memory:")
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_file)) ?? ".");
+            _conn = new Microsoft.Data.Sqlite.SqliteConnection(
+                _file == ":memory:" ? "Data Source=:memory:" : $"Data Source={_file}");
+            _conn.Open();
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = """
+                PRAGMA journal_mode=WAL;
+                PRAGMA synchronous=NORMAL;
+                CREATE TABLE IF NOT EXISTS requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL, method TEXT NOT NULL, path TEXT NOT NULL,
+                    model TEXT, key_id TEXT, key_name TEXT, account_id TEXT,
+                    status_code INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+                    stream INTEGER NOT NULL DEFAULT 0, poll INTEGER NOT NULL DEFAULT 0,
+                    error TEXT, client_ip TEXT, user_agent TEXT, task_id TEXT,
+                    task_status TEXT, task_ms INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests (ts);
+                CREATE INDEX IF NOT EXISTS idx_requests_key ON requests (key_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_requests_account ON requests (account_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_requests_task ON requests (task_id);
+                """;
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void Add(RequestRecord r)
+    {
+        lock (_lock)
+        {
+            if (_conn is null) return;
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.CommandText = """
+                    INSERT INTO requests (ts, method, path, model, key_id, key_name,
+                        account_id, status_code, latency_ms, stream, poll, error,
+                        client_ip, task_id)
+                    VALUES ($ts, $method, $path, $model, $keyId, $keyName, $accountId,
+                        $status, $latency, $stream, $poll, $error, $clientIp, $taskId)
+                    """;
+                cmd.Parameters.AddWithValue("$ts", r.Ts);
+                cmd.Parameters.AddWithValue("$method", r.Method);
+                cmd.Parameters.AddWithValue("$path", r.Path);
+                cmd.Parameters.AddWithValue("$model", (object?)r.Model ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$keyId", (object?)r.KeyId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$keyName", (object?)r.KeyName ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$accountId", (object?)r.AccountId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$status", r.StatusCode);
+                cmd.Parameters.AddWithValue("$latency", r.LatencyMs);
+                cmd.Parameters.AddWithValue("$stream", r.Stream ? 1 : 0);
+                cmd.Parameters.AddWithValue("$poll", r.Poll ? 1 : 0);
+                cmd.Parameters.AddWithValue("$error", (object?)r.Error ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$clientIp", (object?)r.ClientIp ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("$taskId", (object?)r.TaskId ?? DBNull.Value);
+                cmd.ExecuteNonQuery();
+            }
+            catch (Exception ex) { Console.WriteLine($"failed to write request log row: {ex.Message}"); }
+        }
+    }
+
+    private static RequestRecord Row(Microsoft.Data.Sqlite.SqliteDataReader rd)
+    {
+        string? S(string name) => rd.IsDBNull(rd.GetOrdinal(name)) ? null : rd.GetString(rd.GetOrdinal(name));
+        return new RequestRecord(
+            rd.GetDouble(rd.GetOrdinal("ts")), S("method") ?? "", S("path") ?? "",
+            S("model"), S("key_id"), S("key_name"), S("account_id"),
+            rd.GetInt32(rd.GetOrdinal("status_code")), rd.GetInt64(rd.GetOrdinal("latency_ms")),
+            rd.GetInt32(rd.GetOrdinal("stream")) != 0, rd.GetInt32(rd.GetOrdinal("poll")) != 0,
+            S("error"), S("client_ip"), S("task_id"));
+    }
+
+    public (List<RequestRecord> Rows, int Total) Query(string? keyId, string? accountId,
+        string? status, string? path, double? since, bool hidePolls, int limit, int offset)
+    {
+        lock (_lock)
+        {
+            if (_conn is null) return (new List<RequestRecord>(), 0);
+            var where = new List<string> { "1=1" };
+            var args = new List<Microsoft.Data.Sqlite.SqliteParameter>();
+            void AddParam(string name, object value)
+            {
+                args.Add(new Microsoft.Data.Sqlite.SqliteParameter(name, value));
+            }
+            if (keyId is not null) { where.Add("key_id = $keyId"); AddParam("$keyId", keyId); }
+            if (accountId is not null) { where.Add("account_id = $accountId"); AddParam("$accountId", accountId); }
+            if (status is "failed") where.Add("status_code >= 400");
+            else if (status is not null && status.Length == 3 && int.TryParse(status[..1], out var d))
+            {
+                where.Add("status_code >= $low AND status_code < $high");
+                AddParam("$low", d * 100); AddParam("$high", d * 100 + 100);
+            }
+            if (path is not null)
+            {
+                where.Add("path LIKE $path ESCAPE '\\'");
+                AddParam("$path", path.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_") + "%");
+            }
+            if (since is not null) { where.Add("ts >= $since"); AddParam("$since", since.Value); }
+            if (hidePolls) where.Add("poll = 0");
+            var cond = string.Join(" AND ", where);
+            int total;
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT COUNT(*) FROM requests WHERE {cond}";
+                cmd.Parameters.AddRange(args.ToArray());
+                total = Convert.ToInt32(cmd.ExecuteScalar());
+            }
+            var rows = new List<RequestRecord>();
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = $"SELECT * FROM requests WHERE {cond} ORDER BY id DESC LIMIT $limit OFFSET $offset";
+                cmd.Parameters.AddRange(args.ToArray());
+                cmd.Parameters.AddWithValue("$limit", limit);
+                cmd.Parameters.AddWithValue("$offset", offset);
+                using var rd = cmd.ExecuteReader();
+                while (rd.Read()) rows.Add(Row(rd));
+            }
+            return (rows, total);
+        }
+    }
+
+    private List<RequestRecord> RowsSince(double start, bool excludePolls)
+    {
+        lock (_lock)
+        {
+            var rows = new List<RequestRecord>();
+            if (_conn is null) return rows;
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = excludePolls
+                ? "SELECT * FROM requests WHERE ts >= $start AND poll = 0"
+                : "SELECT * FROM requests WHERE ts >= $start";
+            cmd.Parameters.AddWithValue("$start", start);
+            using var rd = cmd.ExecuteReader();
+            while (rd.Read()) rows.Add(Row(rd));
+            return rows;
+        }
+    }
+
+    public Dictionary<string, object?> Stats(string window)
+    {
+        var (length, bucket) = window switch
+        {
+            "1h" => (3600.0, 60.0), "7d" => (7 * 86400.0, 3 * 3600.0), _ => (86400.0, 1800.0),
+        };
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var start = Math.Floor((now - length) / bucket) * bucket + bucket;
+        var nBuckets = (int)((now - start) / bucket) + 1;
+        List<RequestRecord> rows;
+        rows = RowsSince(start, excludePolls: true);
+        var lat = rows.Select(r => (long)r.LatencyMs).OrderBy(x => x).ToList();
+        long? Percentile(double q) => lat.Count == 0 ? null
+            : lat[Math.Max(0, Math.Min(lat.Count - 1, (int)Math.Ceiling(q * lat.Count) - 1))];
+        var series = Enumerable.Range(0, nBuckets).Select(i => new Dictionary<string, object?>
+        {
+            ["t"] = start + i * bucket, ["count"] = 0, ["errors"] = 0,
+        }).ToList();
+        foreach (var r in rows)
+        {
+            var idx = (int)((r.Ts - start) / bucket);
+            if (idx >= 0 && idx < nBuckets)
+            {
+                series[idx]["count"] = (int)series[idx]["count"]! + 1;
+                if (r.StatusCode >= 400) series[idx]["errors"] = (int)series[idx]["errors"]! + 1;
+            }
+        }
+        return new Dictionary<string, object?>
+        {
+            ["window"] = window, ["since"] = start, ["bucket_seconds"] = bucket,
+            ["total"] = rows.Count, ["errors"] = rows.Count(r => r.StatusCode >= 400),
+            ["server_errors"] = rows.Count(r => r.StatusCode >= 500),
+            ["error_rate"] = rows.Count == 0 ? 0.0 : (double)rows.Count(r => r.StatusCode >= 400) / rows.Count,
+            ["latency_ms"] = new Dictionary<string, object?>
+                { ["p50"] = Percentile(0.50), ["p95"] = Percentile(0.95) },
+            ["by_key"] = By(rows, r => r.KeyId, r => r.KeyName),
+            ["by_account"] = By(rows, r => r.AccountId, null),
+            ["by_model"] = By(rows, r => r.Model, null),
+            ["by_status"] = By(rows, r => r.StatusCode.ToString(), null),
+            ["series"] = series,
+        };
+    }
+
+    private static List<Dictionary<string, object?>> By(List<RequestRecord> rows,
+        Func<RequestRecord, string?> key, Func<RequestRecord, string?>? name)
+    {
+        return rows.GroupBy(key).OrderByDescending(g => g.Count()).Take(50)
+            .Select(g => new Dictionary<string, object?>
+            {
+                ["key_id"] = g.Key, ["key_name"] = name is null ? null : g.FirstOrDefault() is { } f ? name(f) : null,
+                ["account_id"] = g.Key, ["model"] = g.Key, ["status_code"] = g.Key is null ? null : int.TryParse(g.Key, out var s) ? s : g.Key,
+                ["count"] = g.Count(), ["errors"] = g.Count(r => r.StatusCode >= 400),
+            }).ToList();
+    }
+
+    public List<Dictionary<string, object?>> KeyUsage()
+    {
+        var since = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 86400;
+        var rows = RowsSince(0, excludePolls: true)
+            .Where(r => r.KeyId is not null).ToList();
+        return rows.GroupBy(r => r.KeyId)
+            .OrderByDescending(g => g.Count()).Select(g => new Dictionary<string, object?>
+            {
+                ["key_id"] = g.Key, ["key_name"] = g.OrderByDescending(r => r.Ts).First().KeyName,
+                ["last_request_at"] = g.Max(r => r.Ts), ["total"] = g.Count(),
+                ["requests_24h"] = g.Count(r => r.Ts >= since),
+                ["errors_24h"] = g.Count(r => r.Ts >= since && r.StatusCode >= 400),
+            }).ToList();
+    }
+
+    /// <summary>Delete rows older than retentionDays, like Python prune().
+    /// Returns the number deleted.</summary>
+    public int Prune(double retentionDays)
+    {
+        lock (_lock)
+        {
+            if (_conn is null) return 0;
+            var cutoff = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - retentionDays * 86400;
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM requests WHERE ts < $cutoff";
+            cmd.Parameters.AddWithValue("$cutoff", cutoff);
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            _conn?.Dispose();
+            _conn = null;
+        }
+    }
+}
+
+// ---------- Background tasks ----------
+public sealed class BgTask
+{
+    public string Id { get; } = "task_" + Guid.NewGuid().ToString("N")[..16];
+    public string Kind { get; set; } = "";
+    public string Status { get; set; } = "queued";
+    public int Progress { get; set; }
+    public double CreatedAt { get; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public double UpdatedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    public Dictionary<string, object?> Request { get; set; } = new();
+    public Dictionary<string, JsonNode?>? Result { get; set; }
+    public Dictionary<string, JsonNode?>? Error { get; set; }
+    public bool Finished => Status is "succeeded" or "failed" or "cancelled";
+}
+
+public sealed class TaskManager
+{
+    private readonly Dictionary<string, BgTask> _tasks = new();
+    private readonly Dictionary<string, CancellationTokenSource> _running = new();
+    private readonly object _lock = new();
+    private readonly string _file;
+
+    public TaskManager(string file) => _file = file;
+
+    public void Load()
+    {
+        if (!File.Exists(_file)) return;
+        try
+        {
+            var list = JsonSerializer.Deserialize<List<BgTask>>(File.ReadAllText(_file)) ?? new();
+            lock (_lock)
+            {
+                foreach (var t in list)
+                {
+                    if (!t.Finished)
+                    {
+                        t.Status = "failed";
+                        t.Error = new Dictionary<string, JsonNode?>
+                            { ["message"] = "interrupted by server restart", ["code"] = "interrupted" };
+                    }
+                    _tasks[t.Id] = t;
+                }
+            }
+        }
+        catch { }
+    }
+
+    private void Persist()
+    {
+        List<BgTask> tasks;
+        lock (_lock) tasks = _tasks.Values.OrderBy(t => t.CreatedAt).TakeLast(500).ToList();
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_file)) ?? ".");
+        var tmp = _file + ".tmp";
+        File.WriteAllText(tmp, JsonSerializer.Serialize(tasks,
+            new JsonSerializerOptions { WriteIndented = true }));
+        File.Move(tmp, _file, overwrite: true);
+    }
+
+    public BgTask? Get(string id) { lock (_lock) return _tasks.GetValueOrDefault(id); }
+    public List<BgTask> List(int limit = 100)
+    {
+        lock (_lock) return _tasks.Values.OrderByDescending(t => t.CreatedAt).Take(limit).ToList();
+    }
+
+    public BgTask Submit(string kind, Dictionary<string, object?> request,
+        Func<Action<int>, Task<Dictionary<string, JsonNode?>>> runner)
+    {
+        var task = new BgTask { Kind = kind, Request = request };
+        var cts = new CancellationTokenSource();
+        lock (_lock) { _tasks[task.Id] = task; _running[task.Id] = cts; }
+        Persist();
+        _ = Run(task, runner, cts.Token);
+        return task;
+    }
+
+    private async Task Run(BgTask task, Func<Action<int>, Task<Dictionary<string, JsonNode?>>> runner,
+        CancellationToken ct)
+    {
+        task.Status = "running";
+        try
+        {
+            task.Result = await runner(p => { task.Progress = Math.Max(task.Progress, Math.Min(99, p)); task.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds(); });
+            task.Status = "succeeded";
+            task.Progress = 100;
+        }
+        catch (OperationCanceledException) { task.Status = "cancelled"; }
+        catch (MuseException ex)
+        {
+            task.Status = "failed";
+            task.Error = new Dictionary<string, JsonNode?> { ["message"] = ex.Message, ["code"] = ex.Code };
+        }
+        catch (Exception ex)
+        {
+            task.Status = "failed";
+            task.Error = new Dictionary<string, JsonNode?> { ["message"] = ex.Message, ["code"] = "internal_error" };
+        }
+        finally
+        {
+            task.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            lock (_lock) _running.Remove(task.Id);
+            Persist();
+        }
+    }
+
+    public bool Cancel(string id)
+    {
+        lock (_lock)
+        {
+            if (!_running.TryGetValue(id, out var cts)) return false;
+            cts.Cancel();
+            return true;
+        }
+    }
+}
+
+// ---------- Media ----------
+public sealed class MediaStore
+{
+    private static readonly Dictionary<string, string> ExtByMime = new()
+    {
+        ["image/png"] = ".png", ["image/jpeg"] = ".jpg", ["image/webp"] = ".webp",
+        ["image/gif"] = ".gif", ["video/mp4"] = ".mp4", ["video/webm"] = ".webm",
+        ["video/quicktime"] = ".mov",
+    };
+
+    public string Root { get; }
+    public MediaStore(string root) { Root = root; Directory.CreateDirectory(root); }
+
+    public string Save(byte[] data, string mime, string prefix = "m")
+    {
+        var ext = ExtByMime.GetValueOrDefault(mime.Split(';')[0].Trim().ToLowerInvariant(), ".bin");
+        var name = $"{prefix}_{Guid.NewGuid():N}"[..20] + ext;
+        File.WriteAllBytes(Path.Combine(Root, name), data);
+        return name;
+    }
+
+    public string PathOf(string name)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"^[A-Za-z0-9_\-]+\.[A-Za-z0-9]+$"))
+            throw MuseException.NotFound("media not found");
+        var path = Path.Combine(Root, name);
+        if (!File.Exists(path)) throw MuseException.NotFound("media not found");
+        return path;
+    }
+
+    public static string MimeOf(string name) => name.EndsWith(".png") ? "image/png"
+        : name.EndsWith(".jpg") ? "image/jpeg"
+        : name.EndsWith(".mp4") ? "video/mp4" : "application/octet-stream";
+
+    public int Prune(double maxAgeSeconds)
+    {
+        if (maxAgeSeconds <= 0) return 0;
+        var cutoff = DateTime.UtcNow.AddSeconds(-maxAgeSeconds);
+        var removed = 0;
+        foreach (var file in Directory.GetFiles(Root))
+        {
+            if (File.GetLastWriteTimeUtc(file) < cutoff)
+            {
+                try { File.Delete(file); removed++; } catch { }
+            }
+        }
+        return removed;
+    }
+}

@@ -1,0 +1,77 @@
+# muse-agent — coding agent chạy trong terminal (kiểu Codex)
+
+Chat với model qua gateway muse2api (OpenAI-compatible), agent tự đọc file,
+sửa file và chạy lệnh/test trong thư mục làm việc bạn chọn — giống Codex CLI,
+nhưng backend là muse.ai qua gateway local thay vì API của OpenAI.
+
+## Chạy trên Windows (cmd / PowerShell)
+
+```powershell
+# 1. Chạy gateway trước (mock hoặc browser driver với tài khoản thật)
+#    xem TESTING.md ở root repo.
+
+# 2. Chạy agent, trỏ tới gateway local
+dotnet run --project src/Muse2Api.Agent -- --workspace C:\code\myapp --api-key <api-key-cua-gateway>
+
+# Một nhiệm vụ rồi thoát (dùng trong script):
+dotnet run --project src/Muse2Api.Agent -- --workspace C:\code\myapp --api-key <key> --yes "chạy dotnet test và sửa lỗi nếu có"
+```
+
+Mặc định: base URL `http://127.0.0.1:18610/v1`, model `muse-chat`.
+Đổi bằng `--base-url`, `--model`, hoặc biến môi trường
+`MUSE_AGENT_BASE_URL`, `MUSE_AGENT_API_KEY`, `MUSE_AGENT_MODEL`,
+`MUSE_AGENT_WORKSPACE`.
+
+## Agent làm được gì
+
+| Tool | Mô tả |
+|---|---|
+| `list_files` | Liệt kê file/thư mục trong workspace |
+| `read_file` | Đọc file |
+| `write_file` | Ghi đè / tạo file mới |
+| `edit_file` | Thay đúng 1 đoạn text khớp chính xác (đọc file trước) |
+| `run_command` | Chạy lệnh trong workspace: PowerShell mặc định trên Windows (`--shell cmd` để dùng cmd.exe), bash trên Linux/macOS |
+
+Lệnh trong REPL: `/help`, `/exit`, `/clear`, `/workspace <đường dẫn>`,
+`/yes` (bật/tắt tự xác nhận), `/model` (xem model hiện tại).
+
+## Cách agent gọi tool
+
+Gateway muse2api chưa hỗ trợ native function calling, nên agent dùng
+định dạng text có cấu trúc: model trả về các block
+
+    ```tool
+    {"name": "read_file", "path": "src/Program.cs"}
+    ```
+
+Agent parse block, chạy tool, gửi kết quả lại cho model, lặp tối đa
+`--max-steps` (mặc định 30) cho tới khi model trả lời không còn tool call
+nữa — đó là đáp án cuối. Nếu gateway sau này hỗ trợ `tool_calls` native,
+agent cũng đã xử lý sẵn trường đó.
+
+## An toàn — đọc kỹ trước khi dùng --yes
+
+- **Jail workspace:** mọi đường dẫn file đều phải nằm trong workspace đã
+  chọn. `../secret.txt` hay đường dẫn tuyệt đối ngoài workspace đều bị
+  từ chối trước khi đọc/ghi.
+- **Xác nhận:** mặc định, trước mỗi `write_file`, `edit_file`,
+  `run_command`, agent in ra nội dung bước đó và hỏi `[y/N]`. Chỉ dùng
+  `--yes` khi bạn đã tin nhiệm vụ và chấp nhận agent tự sửa/chạy lệnh.
+- **Không có danh sách lệnh cấm cứng:** agent tin vào xác nhận của bạn.
+  Đừng chạy `--yes` trong workspace chứa dữ liệu quan trọng mà chưa
+  commit, và đừng cho agent workspace là `C:\` hay thư mục home.
+- **API key** chỉ dùng để gọi gateway bạn chỉ định, không gửi đi nơi khác.
+
+## Giới hạn đã biết
+
+- Trí tuệ của agent phụ thuộc hoàn toàn vào model qua gateway. Với driver
+  mock, model chỉ echo lại prompt nên agent sẽ không tự sinh tool call
+  thật — cần tài khoản thật + browser driver (xem TESTING.md bước 4)
+  mới test được vòng lặp agent thật.
+- Trên VM Linux này, `HttpClient` của .NET tới server local bị sandbox
+  chặn TCP trực tiếp (curl/python thì chạy được), nên vòng lặp HTTP
+  chưa kiểm chứng end-to-end ở đây; vòng lặp tool (đọc → sửa → chạy
+  lệnh) đã kiểm chứng bằng canned responses: file sửa đúng, lệnh chạy
+  `exit_code=0`, đọc ngoài workspace bị chặn.
+- Lệnh chạy qua `Process` với timeout mặc định 120s (đổi bằng
+  `timeout_seconds` trong tool call); lệnh chờ nhập liệu sẽ bị timeout.
