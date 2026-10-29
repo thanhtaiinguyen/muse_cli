@@ -28,6 +28,8 @@ try {
     if (!$env:MUSE2API_CHROMIUM_PATH -and (Test-Path -LiteralPath 'C:\Program Files\Google\Chrome\Application\chrome.exe')) { $env:MUSE2API_CHROMIUM_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe' }
     & $DotNet test tests/Muse2Api.Tests/Muse2Api.Tests.csproj -c Release --artifacts-path $artifactRoot --nologo -v minimal
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed; old releases were kept.' }
+    & $DotNet test tests/Muse2Api.Computer.Tests/Muse2Api.Computer.Tests.csproj -c Release --artifacts-path $artifactRoot --nologo -v minimal
+    if ($LASTEXITCODE -ne 0) { throw 'Windows computer tests failed; old releases were kept.' }
     & $DotNet publish src/Muse2Api.WinForms/Muse2Api.WinForms.csproj -c Release -r win-x64 --self-contained true --artifacts-path $artifactRoot -o $stagingRelease -p:DebugType=None -p:DebugSymbols=false --nologo -v minimal
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed; old releases were kept.' }
     $stagingRelease = Assert-ReleasePath $stagingRelease
@@ -37,7 +39,7 @@ try {
     if ((Get-Item -LiteralPath $executable).VersionInfo.ProductVersion.Split('+')[0] -ne $expectedVersion) { throw 'Unexpected published version; cleanup aborted.' }
     $check = Start-Process -FilePath $executable -ArgumentList '--check-installation' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $artifactRoot 'desktop-installation.log') -RedirectStandardError (Join-Path $artifactRoot 'desktop-installation-error.log')
     if ($check.ExitCode -ne 0) { throw 'Installation check failed; old releases were kept.' }
-    $privateFiles = @(Get-ChildItem -LiteralPath $stagingRelease -Recurse -File | Where-Object { $_.Name -in @('accounts.json','api_key','keys.json','requests.db') -or $_.DirectoryName -match 'browser-sessions|local-conversations' })
+    $privateFiles = @(Get-ChildItem -LiteralPath $stagingRelease -Recurse -File | Where-Object { $_.Name -in @('accounts.json','api_key','keys.json','requests.db','cookies.json','storage-state.json','auth.json') -or $_.DirectoryName -match 'browser-sessions|local-conversations' })
     if ($privateFiles.Count) { throw 'Personal data found in package; cleanup aborted.' }
     $oldReleases = @(Get-ChildItem -LiteralPath $distributionRoot -Directory | Where-Object { $_.FullName -ne $stagingRelease -and ($_.Name -match '^Muse(?:-\d+\.\d+\.\d+)?$' -or $_.Name -match '^Muse\.stage\.[a-f0-9]{32}$') })
     foreach ($release in $oldReleases) {
