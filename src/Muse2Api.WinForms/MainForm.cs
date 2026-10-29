@@ -10,7 +10,7 @@ public sealed class MainForm : Form
     private readonly GatewayClient _client = new();
     private readonly AgentWorkspaceControl _workspace;
     private readonly CancellationTokenSource _lifetime = new();
-    private readonly string _dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "Gateway");
+    private readonly string _dataDirectory = Path.Combine(DesktopDataPaths.Root, "Gateway");
     private readonly StringBuilder _diagnostics = new();
     private DesktopGatewayHost? _gateway;
     private Task<bool>? _setupTask;
@@ -151,12 +151,13 @@ public sealed class MainForm : Form
 
     private void ImportLegacyAccounts()
     {
+        if (DesktopDataPaths.IsOverride) return; // An isolated test profile must not import live accounts.
         var destination = Path.Combine(_dataDirectory, "accounts.json");
         if (File.Exists(destination)) return;
         var candidates = new List<string>();
         foreach (var config in new[]
         {
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "ui_config.json"),
+            Path.Combine(DesktopDataPaths.Root, "ui_config.json"),
             Path.Combine(AppContext.BaseDirectory, "ui_config.json"),
         })
         {
