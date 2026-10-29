@@ -372,7 +372,8 @@ public sealed partial class AgentWorkspaceControl
         {
             if (cancel.IsCancellationRequested) { completion.TrySetCanceled(cancel); return; }
             if (_permissions.SelectedIndex == 1) { _state.Text = "Chế độ chỉ xem đang bật. Có thể đổi chế độ trong Cài đặt."; completion.TrySetResult(false); return; }
-            if (_permissions.SelectedIndex == 2) { completion.TrySetResult(true); return; }
+            if (_permissions.SelectedIndex == 2 && !TurboApprovalPolicy.RequiresExplicitApproval(approval.Call))
+            { completion.TrySetResult(true); return; }
             DrainEvents();
             _state.Text = "Muse đang chờ bạn xem và cho phép thao tác tiếp theo.";
             using var dialog = new ToolApprovalForm(approval);
