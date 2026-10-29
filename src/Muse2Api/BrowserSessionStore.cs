@@ -23,11 +23,13 @@ public sealed class BrowserSessionStore(string dataDirectory)
             if (!File.Exists(file)) return null;
             var saved = JsonSerializer.Deserialize<SavedState>(PrivateDataProtection.ReadFile(file));
             if (saved is null || saved.AuthenticationHash != AuthenticationHash(account)) return null;
-            PrivateDataProtection.MigrateLegacyFile(file);
             using var state = JsonDocument.Parse(saved.StorageState);
-            return state.RootElement.ValueKind == JsonValueKind.Object
+            var valid = state.RootElement.ValueKind == JsonValueKind.Object
                 && state.RootElement.TryGetProperty("cookies", out var cookies) && cookies.ValueKind == JsonValueKind.Array
-                && state.RootElement.TryGetProperty("origins", out var origins) && origins.ValueKind == JsonValueKind.Array ? saved.StorageState : null;
+                && state.RootElement.TryGetProperty("origins", out var origins) && origins.ValueKind == JsonValueKind.Array;
+            if (!valid) return null;
+            PrivateDataProtection.MigrateLegacyFile(file);
+            return saved.StorageState;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }
