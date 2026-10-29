@@ -21,8 +21,9 @@ public sealed class BrowserSessionStore(string dataDirectory)
         {
             var file = PathFor(account);
             if (!File.Exists(file)) return null;
-            var saved = JsonSerializer.Deserialize<SavedState>(File.ReadAllText(file));
+            var saved = JsonSerializer.Deserialize<SavedState>(PrivateDataProtection.ReadFile(file));
             if (saved is null || saved.AuthenticationHash != AuthenticationHash(account)) return null;
+            PrivateDataProtection.MigrateLegacyFile(file);
             using var state = JsonDocument.Parse(saved.StorageState);
             return state.RootElement.ValueKind == JsonValueKind.Object
                 && state.RootElement.TryGetProperty("cookies", out var cookies) && cookies.ValueKind == JsonValueKind.Array
@@ -37,12 +38,7 @@ public sealed class BrowserSessionStore(string dataDirectory)
         if (parsed.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Invalid browser state");
         var file = PathFor(account);
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new SavedState(AuthenticationHash(account), storageState)));
-            File.Move(temporary, file, overwrite: true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        await Task.Run(() => PrivateDataProtection.WriteFile(file,
+            JsonSerializer.Serialize(new SavedState(AuthenticationHash(account), storageState))));
     }
 }
