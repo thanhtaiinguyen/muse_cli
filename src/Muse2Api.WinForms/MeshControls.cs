@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 
 namespace Muse2Api.WinForms;
@@ -11,6 +12,7 @@ internal sealed class MeshLayout : TableLayoutPanel
     private Bitmap? _field;
     private DesktopTheme.ThemeMode _renderedMode;
     public MeshTone Tone { get; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool FocusHighlight { get; set; }
 
     public MeshLayout(MeshTone tone, params RowStyle[] rows)
@@ -133,6 +135,7 @@ internal sealed class WorkspaceTabs : UserControl
         };
     }
 
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public int SelectedIndex
     {
         get => _selected;
