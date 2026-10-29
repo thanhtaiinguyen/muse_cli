@@ -1,6 +1,10 @@
 name: Package Muse for Windows
 
 on:
+  push:
+    branches:
+      - 'upgrade/**'
+  pull_request:
   workflow_dispatch:
     inputs:
       publish_release:
