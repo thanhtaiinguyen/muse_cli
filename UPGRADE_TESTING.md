@@ -82,7 +82,7 @@ trên cùng máy/tài khoản Windows. Không dùng `git reset --hard` để xó
 ## 5. GitHub Actions và gói ZIP
 
 - Mở tab **Actions → CI (.NET 10 / Windows)** để xem build, core test, Windows computer tests và secret scan.
-- Vào **Actions → Package Muse for Windows → Run workflow**, chọn đúng branch để build gói riêng.
+- Workflow **Package Muse for Windows** tự chạy trên branch nâng cấp hoặc PR; sau khi merge có thể chọn **Run workflow** thủ công.
 - Sau khi job thành công, tải artifact ZIP và kiểm tra SHA256.
 - Workflow package không công khai Release nếu không chọn `publish_release=true` và nhập tag phù hợp.
 
