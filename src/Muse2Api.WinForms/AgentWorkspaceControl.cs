@@ -75,7 +75,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _shell.Items.AddRange(new object[] { "powershell", "cmd", "bash" }); _shell.SelectedIndex = 0;
         _terminalShell.Items.AddRange(new object[] { "PowerShell", "CMD", "Bash" }); _terminalShell.SelectedIndex = 0;
         _terminalShell.SelectedIndexChanged += (_, _) => { if (!_busy) _shell.SelectedIndex = _terminalShell.SelectedIndex; };
-        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — tự chạy, không hỏi" }); _permissions.SelectedIndex = 0;
+        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — hỏi trước khi chạy lệnh" }); _permissions.SelectedIndex = 0;
         _timer.Tick += async (_, _) =>
         {
             DrainEvents();
