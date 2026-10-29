@@ -74,12 +74,14 @@ public sealed class Settings
         EnsureDirs();
         if (File.Exists(KeyFile))
         {
-            ApiKey = File.ReadAllText(KeyFile).Trim();
+            ApiKey = PrivateDataProtection.ReadFile(KeyFile).Trim();
+            // Preserve the key and upgrade plaintext storage for existing desktop profiles.
+            if (!string.IsNullOrEmpty(ApiKey)) PrivateDataProtection.MigrateLegacyFile(KeyFile);
             if (!string.IsNullOrEmpty(ApiKey)) return;
         }
         ApiKey = "m2a-" + Convert.ToHexString(
             System.Security.Cryptography.RandomNumberGenerator.GetBytes(18)).ToLowerInvariant();
-        File.WriteAllText(KeyFile, ApiKey);
+        PrivateDataProtection.WriteFile(KeyFile, ApiKey);
     }
 
     private static string Env(string name, string fallback)
