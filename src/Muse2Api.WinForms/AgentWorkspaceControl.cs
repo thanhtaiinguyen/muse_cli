@@ -102,7 +102,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _sessions.SelectedIndexChanged += async (_, _) => { if (!_binding && !_busy && _sessions.SelectedItem is ChatSession session) await LoadSession(session.Id); };
         _sessions.DrawItem += DrawSession;
         _tree.BeforeExpand += (_, e) => { if (e.Node is { } node && node.Nodes.Count == 1 && node.Nodes[0].Tag is null) Populate(node); };
-        _tree.NodeMouseDoubleClick += async (_, e) => { if (e.Node.Tag is string path && File.Exists(path)) { await OpenFile(path); ToggleDrawer(0, forceOpen: true); } };
+        _tree.NodeMouseDoubleClick += async (_, e) => { if (e.Node?.Tag is string path && File.Exists(path)) { await OpenFile(path); ToggleDrawer(0, forceOpen: true); } };
         _changes.SelectedIndexChanged += (_, _) => _diff.Text = (_changes.SelectedItem as WorkspaceChange)?.Diff ?? "Chưa có thay đổi nào trong lần làm việc này.";
         _editor.TextChanged += (_, _) => { if (!_settingEditor) { _dirty = _editor.Text != _editorDisplayBaseline; UpdateEditorTitle(); } };
         _editor.KeyDown += async (_, e) => { if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; await SaveEditor(); } };
