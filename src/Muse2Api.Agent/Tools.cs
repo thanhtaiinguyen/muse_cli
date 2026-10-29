@@ -7,85 +7,50 @@ namespace Muse2Api.Agent;
 /// OpenAI tool_calls entry. Args are the JSON object minus the "name" field.</summary>
 public sealed record ToolCall(string Name, JsonObject Args);
 
-/// <summary>Parses the agent's tool-call format. The muse2api gateway does
-/// not (yet) do native tool calling, so the model emits fenced blocks:
-///
-/// ```tool
-/// {"name": "read_file", "path": "src/Program.cs"}
-/// ```
-/// </summary>
-public static class ToolCallParser
-{
-    public static List<ToolCall> Parse(string text)
-    {
-        var calls = new List<ToolCall>();
-        var idx = 0;
-        while (true)
-        {
-            var start = text.IndexOf("```tool", idx, StringComparison.Ordinal);
-            if (start < 0) break;
-            var jsonStart = text.IndexOf('\n', start);
-            if (jsonStart < 0) break;
-            var end = text.IndexOf("```", jsonStart + 1, StringComparison.Ordinal);
-            if (end < 0) break;
-            var json = text[(jsonStart + 1)..end].Trim();
-            idx = end + 3;
-            try
-            {
-                var obj = JsonNode.Parse(json) as JsonObject;
-                var name = obj?["name"]?.GetValue<string>();
-                if (obj is null || string.IsNullOrEmpty(name)) continue;
-                obj.Remove("name");
-                calls.Add(new ToolCall(name, obj));
-            }
-            catch
-            {
-                // A malformed block is reported as a failed tool call so the
-                // model can see the error and retry, instead of silently
-                // dropping the whole turn.
-                calls.Add(new ToolCall("__parse_error__",
-                    new JsonObject { ["error"] = $"could not parse tool block as JSON: {json}" }));
-            }
-        }
-        return calls;
-    }
-
-    /// <summary>Assistant text with tool blocks removed, for display.</summary>
-    public static string StripToolBlocks(string text)
-    {
-        var result = text;
-        while (true)
-        {
-            var start = result.IndexOf("```tool", StringComparison.Ordinal);
-            if (start < 0) break;
-            var end = result.IndexOf("```", start + 7, StringComparison.Ordinal);
-            if (end < 0) break;
-            result = result[..start] + result[(end + 3)..];
-        }
-        return result.Trim();
-    }
-}
-
 /// <summary>The agent's tools. Every file path is jailed inside the
 /// workspace root: "..", absolute paths outside the root and symlinked
 /// escapes are all rejected before any read or write happens.</summary>
-public sealed class ToolExecutor
+public sealed partial class ToolExecutor
 {
     public string Root { get; }
-    public string Shell { get; }
+    public string Shell { get; set; }
 
     public ToolExecutor(string root, string shell = "auto")
     {
-        Root = Path.GetFullPath(root);
+        Root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        if (!Directory.Exists(Root)) throw new DirectoryNotFoundException($"workspace not found: {Root}");
+        RejectLinks(Root);
         Shell = shell;
     }
 
     private string Resolve(string path)
     {
+        // Models may return slash-separated relative paths on Windows or a
+        // workspace-qualified path. Treat both consistently before checking links.
+        if (OperatingSystem.IsWindows()) path = path.Replace('/', Path.DirectorySeparatorChar);
         var full = Path.GetFullPath(Path.Combine(Root, path));
-        if (full != Root && !full.StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var prefix = Path.EndsInDirectorySeparator(Root) ? Root : Root + Path.DirectorySeparatorChar;
+        if (!full.Equals(Root, comparison) && !full.StartsWith(prefix, comparison))
             throw new InvalidOperationException($"path is outside the workspace: {path}");
+        RejectLinks(full);
         return full;
+    }
+
+    // Check every existing path component, including dangling links and
+    // Windows junctions; lexical '..' checks alone do not contain file access.
+    private static void RejectLinks(string full)
+    {
+        for (var current = full; !string.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+        {
+            try
+            {
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidOperationException($"symbolic links and junctions are not allowed: {current}");
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+        }
     }
 
     private static string Str(JsonObject args, string name, string fallback = "")
@@ -97,23 +62,39 @@ public sealed class ToolExecutor
     private static string Truncate(string s, int max = 20000)
         => s.Length <= max ? s : s[..max] + $"\n... [truncated, {s.Length} chars total]";
 
-    public async Task<string> ExecuteAsync(ToolCall call)
+    public async Task<string> ExecuteAsync(ToolCall call, CancellationToken cancel = default)
+    {
+        try { return await ExecutePreparedAsync(await PrepareAsync(call, cancel), cancel); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { return $"error: {ex.Message}"; }
+    }
+
+    public async Task<string> ExecutePreparedAsync(ToolApproval prepared, CancellationToken cancel = default,
+        Action<string>? output = null)
     {
         try
         {
+            cancel.ThrowIfCancellationRequested();
+            var call = prepared.Call;
             return call.Name switch
             {
-                "list_files" => ListFiles(Str(call.Args, "path", "."), Bool(call.Args, "recursive")),
-                "read_file" => await ReadFileAsync(Str(call.Args, "path")),
-                "write_file" => await WriteFileAsync(Str(call.Args, "path"), Str(call.Args, "content")),
-                "edit_file" => await EditFileAsync(Str(call.Args, "path"),
-                    Str(call.Args, "old_text"), Str(call.Args, "new_text")),
+                "list_files" => ListFiles(Str(call.Args, "path", "."), Bool(call.Args, "recursive"), Int(call.Args, "offset", 0), Int(call.Args, "limit", 200)),
+                "read_file" => await ReadFileAsync(Str(call.Args, "path"), Int(call.Args, "start_line", 1), Int(call.Args, "max_lines", 1000), cancel, Bool(call.Args, "details")),
+                "read_files" => await ReadFilesAsync(call.Args, cancel),
+                "write_file" or "edit_file" => await ApplyPreparedAsync(prepared, cancel),
+                "search_files" => await SearchFilesAsync(call.Args, cancel),
+                "git_status" => await GitAsync(new[] { "status", "--short", "--branch" }, cancel),
+                "git_diff" => await GitAsync(new[] { "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--", "." }, cancel),
+                "run_command" when Bool(call.Args, "background") => await StartProcessAsync(call.Args, cancel),
+                "process_status" or "process_input" or "process_stop" => await ProcessToolAsync(call, cancel),
                 "run_command" => await RunCommandAsync(Str(call.Args, "command"),
-                    Str(call.Args, "shell"), Str(call.Args, "workdir", "."), call.Args["timeout_seconds"] is JsonValue tv && tv.TryGetValue<int>(out var t) ? t : 120),
+                    Str(call.Args, "shell"), Str(call.Args, "workdir", "."), Int(call.Args, "timeout_seconds", 120), cancel, output),
+                _ when call.Name.StartsWith("computer_", StringComparison.Ordinal) => await ComputerAsync(call, cancel),
                 "__parse_error__" => "error: " + Str(call.Args, "error"),
-                _ => $"error: unknown tool '{call.Name}'. Available tools: list_files, read_file, write_file, edit_file, run_command.",
+                _ => $"error: unknown tool '{call.Name}'. Available tools: list_files, read_file, search_files, write_file, edit_file, run_command, git_status, git_diff.",
             };
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             return $"error: {ex.Message}";
@@ -121,7 +102,7 @@ public sealed class ToolExecutor
     }
 
     public bool NeedsConfirmation(ToolCall call)
-        => call.Name is "write_file" or "edit_file" or "run_command";
+        => call.Name is "write_file" or "edit_file" or "run_command" or "process_input" or "process_stop";
 
     public string Describe(ToolCall call) => call.Name switch
     {
@@ -131,95 +112,72 @@ public sealed class ToolExecutor
         _ => $"{call.Name} {string.Join(", ", call.Args.Select(kv => $"{kv.Key}={kv.Value}"))}",
     };
 
-    private string ListFiles(string path, bool recursive)
+    private string ListFiles(string path, bool recursive, int offset, int limit)
     {
         var dir = Resolve(path);
         if (!Directory.Exists(dir)) return $"error: directory not found: {path}";
-        var option = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-        var entries = Directory.EnumerateFileSystemEntries(dir, "*", option)
-            .OrderBy(e => e)
-            .Take(200)
+        if (offset < 0 || limit < 1) return "error: offset must be nonnegative and limit must be positive";
+        limit = Math.Min(limit, 1000);
+        var found = WorkspaceFiles.Enumerate(dir, recursive).Skip(offset).Take(limit + 1).ToArray();
+        var entries = found.Take(limit)
             .Select(e => Path.GetRelativePath(Root, e).Replace('\\', '/')
                 + (Directory.Exists(e) ? "/" : ""));
-        return string.Join('\n', entries);
+        return string.Join('\n', entries) + (found.Length > limit ? $"\n[more entries; next_offset={offset + limit}; use offset]" : "");
     }
 
-    private async Task<string> ReadFileAsync(string path)
+    private async Task<string> ReadFileAsync(string path, int start, int maxLines, CancellationToken cancel, bool details = false)
     {
         var full = Resolve(path);
         if (!File.Exists(full)) return $"error: file not found: {path}";
-        return Truncate(await File.ReadAllTextAsync(full));
-    }
-
-    private async Task<string> WriteFileAsync(string path, string content)
-    {
-        var full = Resolve(path);
-        Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-        await File.WriteAllTextAsync(full, content);
-        return $"wrote {path} ({content.Length} chars)";
-    }
-
-    private async Task<string> EditFileAsync(string path, string oldText, string newText)
-    {
-        if (string.IsNullOrEmpty(oldText)) return "error: old_text must not be empty";
-        var full = Resolve(path);
-        if (!File.Exists(full)) return $"error: file not found: {path}";
-        var content = await File.ReadAllTextAsync(full);
-        var count = 0;
-        var idx = 0;
-        while ((idx = content.IndexOf(oldText, idx, StringComparison.Ordinal)) >= 0)
+        var text = await ReadTextAsync(full, cancel);
+        if (start < 1 || maxLines < 1) return "error: start_line and max_lines must be positive";
+        var lines = text.Split('\n');
+        if (start > lines.Length) return $"error: start_line {start} exceeds total lines {lines.Length}";
+        var output = new System.Text.StringBuilder();
+        var next = start;
+        foreach (var line in lines.Skip(start - 1).Take(Math.Min(maxLines, 4000)))
         {
-            count++;
-            idx += oldText.Length;
+            var rendered = details ? $"{next,5}: {line}" : line;
+            if (output.Length + rendered.Length > 48000)
+            {
+                if (next == start) return $"error: line {next} exceeds read page size; use search_files to narrow down the content";
+                break;
+            }
+            if (output.Length > 0) output.Append('\n');
+            output.Append(rendered); next++;
         }
-        if (count == 0) return "error: old_text not found in file";
-        if (count > 1) return $"error: old_text matches {count} times; make it more specific so it matches exactly once";
-        await File.WriteAllTextAsync(full, content.Replace(oldText, newText, StringComparison.Ordinal));
-        return $"edited {path} (1 replacement)";
+        RecordRead(full, text, start, next - 1, lines.Length);
+        var header = details ? $"File: {Path.GetRelativePath(Root, full)}\nLines: {start}-{next - 1}/{lines.Length}\ncontent_sha256: {ContentHash(text)}\n\n" : "";
+        return header + output + (next <= lines.Length ? $"\n[more lines; total={lines.Length}; next_start_line={next}; use start_line]" : "");
     }
 
-    private async Task<string> RunCommandAsync(string command, string shell, string workdir, int timeoutSeconds)
+    private async Task<string> ReadFilesAsync(JsonObject args, CancellationToken cancel)
     {
-        if (string.IsNullOrWhiteSpace(command)) return "error: command must not be empty";
-        var (file, args) = ResolveShell(shell, command);
-        var psi = new ProcessStartInfo
+        if (args["paths"] is not JsonArray paths || paths.Count is < 1 or > 8) return "error: paths must contain 1 to 8 files";
+        var output = new System.Text.StringBuilder();
+        foreach (var path in paths)
         {
-            FileName = file,
-            WorkingDirectory = Resolve(workdir),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        // ArgumentList, not a pre-quoted Arguments string: .NET handles
-        // quoting per platform, and a manually quoted "-c 'cmd'" string
-        // makes bash look for a command literally named "cat demo.txt".
-        foreach (var a in args) psi.ArgumentList.Add(a);
-        using var proc = new Process { StartInfo = psi };
-        try { proc.Start(); }
-        catch (Exception ex) { return $"error: could not start shell ({file}): {ex.Message}"; }
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        var exited = await Task.Run(() => proc.WaitForExit(Math.Max(1, timeoutSeconds) * 1000));
-        if (!exited)
-        {
-            try { proc.Kill(entireProcessTree: true); } catch { }
-            return $"error: command timed out after {timeoutSeconds}s and was killed";
+            if (path is not JsonValue value || !value.TryGetValue<string>(out var name)) return "error: paths must be strings";
+            var content = await ReadFileAsync(name, Int(args, "start_line", 1), Int(args, "max_lines", 300), cancel, details: true);
+            if (output.Length + content.Length > 60000) { output.AppendLine("\n[batch limit reached; read remaining files individually]"); break; }
+            output.AppendLine(content).AppendLine();
         }
-        var stdout = Truncate(await stdoutTask, 8000);
-        var stderr = Truncate(await stderrTask, 8000);
-        return $"exit_code={proc.ExitCode}\nstdout:\n{stdout}\n stderr:\n{stderr}";
+        return output.ToString();
     }
 
     private (string File, string[] Args) ResolveShell(string requested, string command)
     {
-        var want = string.IsNullOrEmpty(requested) ? Shell : requested;
+        var want = (string.IsNullOrEmpty(requested) ? Shell : requested).Trim().ToLowerInvariant();
+        want = want switch { "cmd.exe" => "cmd", "powershell.exe" => "powershell", "bash.exe" => "bash", _ => want };
+        if (want is not ("auto" or "powershell" or "cmd" or "bash")) throw new InvalidOperationException("shell must be auto, powershell, cmd or bash");
         if (OperatingSystem.IsWindows())
         {
-            if (want is "cmd") return ("cmd.exe", new[] { "/c", command });
+            if (want is "cmd" or "cmd.exe") return (Path.Combine(Environment.SystemDirectory, "cmd.exe"), new[] { "/d", "/c", command });
             // Default on Windows: PowerShell, like Codex on Windows.
-            return ("powershell.exe", new[] { "-NoProfile", "-NonInteractive", "-Command", command });
+            if (want == "bash") return ("bash", new[] { "-c", command });
+            return (Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), new[] { "-NoProfile", "-NonInteractive", "-Command", command });
         }
+        if (want is "powershell" or "cmd") throw new InvalidOperationException($"shell '{want}' is only supported on Windows");
         // Linux/macOS (used to develop and test this agent on this VM).
         return ("/bin/bash", new[] { "-c", command });
     }

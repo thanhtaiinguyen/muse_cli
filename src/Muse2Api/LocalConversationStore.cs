@@ -1,0 +1,47 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace Muse2Api;
+
+/// <summary>One desktop conversation owns one upstream thread across rounds and restarts.</summary>
+public sealed class LocalConversationStore(string dataDirectory)
+{
+    public sealed record Entry(string Account, string Url, bool Pending = false, string ImageHash = "");
+    private static string Hash(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)));
+    private string FileFor(string hint) => Path.Combine(dataDirectory, "local-conversations", Hash(hint) + ".json");
+
+    public Entry? Load(string accountId, string hint)
+    {
+        var file = FileFor(hint);
+        if (!File.Exists(file)) return null;
+        Entry entry;
+        try { entry = JsonSerializer.Deserialize<Entry>(File.ReadAllText(file)) ?? throw new JsonException(); }
+        catch (Exception ex) when (ex is JsonException or IOException)
+        { throw UpstreamException.Refused("Saved Muse conversation cannot be read. No replacement chat was created."); }
+        if (entry.Url is null || string.IsNullOrEmpty(entry.Account)) throw UpstreamException.Refused("Saved Muse conversation is incomplete. No replacement chat was created.");
+        if (entry.Account != Hash(accountId)) throw UpstreamException.Refused("This conversation belongs to another Muse account. Reconnect that account; no replacement chat was created.");
+        if (entry.Url.Length > 0 && !IsThread(entry.Url)) throw UpstreamException.Refused("Saved Muse conversation URL is invalid. No replacement chat was created.");
+        return entry;
+    }
+
+    public void Save(string accountId, string hint, string url, bool pending, string imageHash = "")
+    {
+        if (string.IsNullOrWhiteSpace(hint)) throw MuseException.Invalid("Local conversations require a stable conversation ID.");
+        if (url.Length > 0 && !IsThread(url)) throw MuseException.Invalid("Invalid Muse thread URL.");
+        var file = FileFor(hint); Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(new Entry(Hash(accountId), url, pending, imageHash)));
+            File.Move(temporary, file, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    public static bool IsThread(string url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https"
+            && uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase) && uri.IsDefaultPort
+            && uri.AbsolutePath.StartsWith("/thread/", StringComparison.Ordinal)
+            && uri.AbsolutePath.TrimEnd('/') is not ("/thread/new" or "/thread");
+}

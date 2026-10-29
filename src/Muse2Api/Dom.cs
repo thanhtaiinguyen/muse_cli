@@ -40,13 +40,33 @@ public static class Dom
 
     public static readonly string ChatState = $$"""
         (() => {
+          const visible = e => e.getClientRects().length > 0
+            && !e.closest('[hidden],[aria-hidden="true"],[inert]')
+            && getComputedStyle(e).visibility !== 'hidden';
+          // A rendered <pre><code> no longer contains Markdown fences.
+          // Reconstruct them before returning tool JSON to the local executor.
+          const replyText = node => {
+            if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+            if (node.nodeType !== Node.ELEMENT_NODE) return '';
+            const tag = node.tagName;
+            if (['BUTTON', 'SVG', 'SCRIPT', 'STYLE'].includes(tag) || node.getAttribute('aria-hidden') === 'true') return '';
+            if (tag === 'PRE') {
+              const code = node.querySelector('code') || node;
+              const language = (code.className || '').match(/(?:language|lang)-([\w-]+)/)?.[1]
+                || code.getAttribute('data-language') || node.getAttribute('data-language') || '';
+              return '\n```' + language + '\n' + (code.textContent || '') + '\n```\n';
+            }
+            if (tag === 'BR') return '\n';
+            const body = [...node.childNodes].map(replyText).join('');
+            return ['DIV', 'P', 'LI', 'UL', 'OL', 'SECTION', 'H1', 'H2', 'H3'].includes(tag) ? body + '\n' : body;
+          };
           const scrollers = [...document.querySelectorAll('*')].filter(e => {
             const s = getComputedStyle(e);
             return (s.overflowY === 'auto' || s.overflowY === 'scroll') && e.scrollHeight > e.clientHeight + 50;
           });
           scrollers.forEach(e => { e.scrollTop = e.scrollHeight; });
-          const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})];
-          const last = bubbles.length ? (bubbles[bubbles.length - 1].innerText || '').trim() : '';
+          const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})].filter(visible);
+          const last = bubbles.length ? replyText(bubbles[bubbles.length - 1]).trim() : '';
           const atts = [...document.querySelectorAll({{Q(Attachment)}})].map(a => {
             const v = a.querySelector('video'), i = a.querySelector('img');
             const m = v || i;
@@ -59,9 +79,15 @@ public static class Dom
             };
           });
           const tail = document.body ? document.body.innerText.slice(-600) : '';
-          return { agentCount: bubbles.length, lastText: last,
-                    generating: !!document.querySelector({{Q(StopButton)}}),
-                    approval: !!document.querySelector({{Q(ApprovalCard)}}),
+          const rateLimited = [...document.querySelectorAll('[role="alert"]')].some(e =>
+            e.getClientRects().length > 0 && /too many requests|rate limit|sending (?:messages|requests) too (?:fast|quickly)/i.test(e.textContent || ''));
+          const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
+          const generating = buttons.some(b => !b.disabled && /^(stop(?: generating| generation| response)?|dừng(?: tạo| phản hồi)?|停止(?:生成)?)(?:[.!…\s]*)$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim()));
+          const error = [...document.querySelectorAll('[role="alert"]')].filter(visible)
+            .map(e => e.innerText || '').find(t => /something went wrong|failed to (?:send|generate)|connection (?:lost|failed)|network error|đã xảy ra lỗi/i.test(t)) || '';
+          return { agentCount: bubbles.length, lastText: last, rateLimited, error,
+                    generating,
+                    approval: [...document.querySelectorAll({{Q(ApprovalCard)}})].some(visible),
                     attachments: atts, tail };
         })()
         """;

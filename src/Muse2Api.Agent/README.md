@@ -44,8 +44,9 @@ Gateway muse2api chưa hỗ trợ native function calling, nên agent dùng
     {"name": "read_file", "path": "src/Program.cs"}
     ```
 
-Agent parse block, chạy tool, gửi kết quả lại cho model, lặp tối đa
-`--max-steps` (mặc định 30) cho tới khi model trả lời không còn tool call
+Agent parse block, chạy tool, gửi kết quả lại cho model, tiếp tục cho tới khi
+model trả lời không còn tool call. Mặc định không tự giới hạn số bước; có thể
+đặt giới hạn rõ ràng bằng `--max-steps N`. Khi không còn tool call
 nữa — đó là đáp án cuối. Nếu gateway sau này hỗ trợ `tool_calls` native,
 agent cũng đã xử lý sẵn trường đó.
 
@@ -53,7 +54,7 @@ agent cũng đã xử lý sẵn trường đó.
 
 - **Jail workspace:** mọi đường dẫn file đều phải nằm trong workspace đã
   chọn. `../secret.txt` hay đường dẫn tuyệt đối ngoài workspace đều bị
-  từ chối trước khi đọc/ghi.
+  từ chối trước khi đọc/ghi. Symlink và junction bị từ chối; liệt kê đệ quy bỏ qua các link.
 - **Xác nhận:** mặc định, trước mỗi `write_file`, `edit_file`,
   `run_command`, agent in ra nội dung bước đó và hỏi `[y/N]`. Chỉ dùng
   `--yes` khi bạn đã tin nhiệm vụ và chấp nhận agent tự sửa/chạy lệnh.
@@ -68,10 +69,10 @@ agent cũng đã xử lý sẵn trường đó.
   mock, model chỉ echo lại prompt nên agent sẽ không tự sinh tool call
   thật — cần tài khoản thật + browser driver (xem TESTING.md bước 4)
   mới test được vòng lặp agent thật.
-- Trên VM Linux này, `HttpClient` của .NET tới server local bị sandbox
-  chặn TCP trực tiếp (curl/python thì chạy được), nên vòng lặp HTTP
-  chưa kiểm chứng end-to-end ở đây; vòng lặp tool (đọc → sửa → chạy
-  lệnh) đã kiểm chứng bằng canned responses: file sửa đúng, lệnh chạy
-  `exit_code=0`, đọc ngoài workspace bị chặn.
+- HTTP client đã được kiểm tra với gateway mock trên localhost, gồm request thành công và lỗi 401. Vòng lặp tool được kiểm tra bằng canned responses; suy luận với tài khoản muse.ai thật vẫn cần kiểm chứng.
 - Lệnh chạy qua `Process` với timeout mặc định 120s (đổi bằng
   `timeout_seconds` trong tool call); lệnh chờ nhập liệu sẽ bị timeout.
+
+Lệnh shell chạy với quyền của người dùng và không bị sandbox trong workspace.
+Chế độ một nhiệm vụ trả exit 0 khi hoàn thành, 1 nếu gọi model lỗi hoặc hết
+giới hạn bước, 2 nếu tham số không hợp lệ.

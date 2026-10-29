@@ -9,7 +9,9 @@ using Muse2Api.Agent;
 //      MUSE_AGENT_API_KEY, MUSE_AGENT_MODEL (default muse-chat),
 //      MUSE_AGENT_WORKSPACE (default current directory).
 
-var opts = ParseArgs(args);
+Options opts;
+try { opts = Options.Parse(args); }
+catch (ArgumentException ex) { Console.Error.WriteLine(ex.Message); return 2; }
 if (opts.Help)
 {
     Console.WriteLine("""
@@ -23,7 +25,7 @@ if (opts.Help)
         Tùy chọn: --base-url URL --api-key KEY --model NAME
                   --workspace DIR --shell powershell|cmd|bash|auto
                   --yes (không hỏi xác nhận trước khi ghi file / chạy lệnh)
-                  --max-steps N (mặc định 30)
+                  --max-steps N (tùy chọn; mặc định không giới hạn số bước)
 
         Lệnh trong REPL: /help /exit /clear /model <tên> /workspace <đường dẫn>
                          /yes (bật/tắt tự xác nhận)
@@ -35,7 +37,7 @@ if (opts.Help)
 
 var workspace = opts.Workspace ?? Environment.GetEnvironmentVariable("MUSE_AGENT_WORKSPACE")
     ?? Directory.GetCurrentDirectory();
-var client = new AgentClient(
+using var client = new AgentClient(
     opts.BaseUrl ?? Environment.GetEnvironmentVariable("MUSE_AGENT_BASE_URL") ?? "http://127.0.0.1:18610/v1",
     opts.Model ?? Environment.GetEnvironmentVariable("MUSE_AGENT_MODEL") ?? "muse-chat",
     opts.ApiKey ?? Environment.GetEnvironmentVariable("MUSE_AGENT_API_KEY"));
@@ -51,8 +53,8 @@ Console.WriteLine();
 
 if (opts.Task is not null)
 {
-    await RunTaskAsync(opts.Task);
-    return 0;
+    try { return await RunTaskAsync(opts.Task) ? 0 : 1; }
+    finally { await tools.StopBackgroundProcessesAsync(); }
 }
 
 while (true)
@@ -80,6 +82,7 @@ while (true)
         var dir = line["/workspace ".Length..].Trim();
         try
         {
+            await tools.StopBackgroundProcessesAsync();
             tools = new ToolExecutor(dir, opts.Shell ?? "auto");
             history.Clear();
             Console.WriteLine($"  Workspace mới: {tools.Root} (lịch sử chat đã xóa).");
@@ -90,23 +93,13 @@ while (true)
     await RunTaskAsync(line);
 }
 
+await tools.StopBackgroundProcessesAsync();
 return 0;
 
-async Task RunTaskAsync(string prompt)
+async Task<bool> RunTaskAsync(string prompt)
 {
     var loop = new AgentLoop(tools,
-        async messages =>
-        {
-            try { return await client.ChatAsync(messages); }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"agent> Lỗi gọi LLM: {ex.Message}");
-                Console.WriteLine("  Kiểm tra gateway đang chạy và MUSE_AGENT_API_KEY / --api-key đã đúng chưa.");
-                // Return an empty final answer so the loop ends instead of
-                // retrying the same failing request for every step.
-                return ("", new List<ToolCall>());
-            }
-        },
+        messages => client.ChatAsync(messages),
         call =>
         {
             if (autoApprove) return true;
@@ -116,34 +109,14 @@ async Task RunTaskAsync(string prompt)
         Console.WriteLine,
         opts.MaxSteps);
     loop.History.AddRange(history.Select(m => (JsonObject)m.DeepClone()));
-    await loop.RunAsync(prompt);
+    bool completed;
+    try { completed = await loop.RunAsync(prompt); }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"agent> Lỗi: {ex.Message}");
+        return false;
+    }
     history.Clear();
     history.AddRange(loop.History.Select(m => (JsonObject)m.DeepClone()));
-}
-
-static Options ParseArgs(string[] argv)
-{
-    string? task = null, baseUrl = null, apiKey = null, model = null, workspace = null, shell = null;
-    var yes = false;
-    var maxSteps = 30;
-    var help = false;
-    var positional = new List<string>();
-    for (var i = 0; i < argv.Length; i++)
-    {
-        string? Next() => i + 1 < argv.Length ? argv[++i] : null;
-        switch (argv[i])
-        {
-            case "--help" or "-h": help = true; break;
-            case "--base-url": baseUrl = Next(); break;
-            case "--api-key": apiKey = Next(); break;
-            case "--model": model = Next(); break;
-            case "--workspace": workspace = Next(); break;
-            case "--shell": shell = Next(); break;
-            case "--yes" or "-y": yes = true; break;
-            case "--max-steps": if (int.TryParse(Next(), out var n)) maxSteps = n; break;
-            default: positional.Add(argv[i]); break;
-        }
-    }
-    if (positional.Count > 0) task = string.Join(' ', positional);
-    return new Options(task, baseUrl, apiKey, model, workspace, shell, yes, maxSteps, help);
+    return completed;
 }

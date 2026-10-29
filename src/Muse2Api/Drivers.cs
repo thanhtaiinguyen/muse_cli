@@ -5,11 +5,11 @@ namespace Muse2Api;
 
 public sealed record InputImage(byte[] Data, string Mime = "image/png");
 public sealed record ChatRequest(string Prompt, string Model, List<InputImage> Images,
-    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel);
+    string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null);
 public sealed record ImageRequest(string Prompt, string Model, string? Size, int N,
-    List<InputImage> References, Action<int>? OnProgress = null);
+    List<InputImage> References, Action<int>? OnProgress = null, CancellationToken Cancel = default);
 public sealed record VideoRequest(string Prompt, string Model, string? Size, int? Duration,
-    InputImage? FirstFrame, Action<int>? OnProgress = null);
+    InputImage? FirstFrame, Action<int>? OnProgress = null, CancellationToken Cancel = default);
 public sealed record MediaResult(byte[] Data, string Mime, string Kind,
     int? Width = null, int? Height = null, string? RevisedPrompt = null);
 public sealed record SessionInfo(bool Ok, Dictionary<string, string> Cookies,
@@ -25,6 +25,7 @@ public interface IMuseDriver
     DriverCapabilities Capabilities { get; }
     Task StartupAsync() => Task.CompletedTask;
     Task ShutdownAsync() => Task.CompletedTask;
+    Task InvalidateAccount(string accountId) => Task.CompletedTask;
     IAsyncEnumerable<string> ChatStream(Account account, ChatRequest req);
     Task<List<MediaResult>> GenerateImage(Account account, ImageRequest req)
         => throw MuseException.NotImplemented($"driver '{Name}' does not support image generation");
@@ -57,8 +58,8 @@ public sealed class MockDriver : IMuseDriver
         if (req.Images.Count > 0) reply += $" (with {req.Images.Count} image(s))";
         for (var i = 0; i < reply.Length; i += 8)
         {
-            if (req.Cancel.IsCancellationRequested) yield break;
-            await Task.Delay(_delayMs);
+            req.Cancel.ThrowIfCancellationRequested();
+            await Task.Delay(_delayMs, req.Cancel);
             yield return reply.Substring(i, Math.Min(8, reply.Length - i));
         }
     }
@@ -70,7 +71,7 @@ public sealed class MockDriver : IMuseDriver
         for (var i = 0; i < n; i++)
         {
             req.OnProgress?.Invoke((i + 1) * 100 / n);
-            await Task.Delay(_delayMs);
+            await Task.Delay(_delayMs, req.Cancel);
             var color = ((byte)(40 + (50 * i) % 200), (byte)120, (byte)200);
             results.Add(new MediaResult(SolidPng(64, 64, color), "image/png", "image",
                 64, 64, req.Prompt));
@@ -82,7 +83,7 @@ public sealed class MockDriver : IMuseDriver
     {
         foreach (var p in new[] { 10, 40, 70, 100 })
         {
-            await Task.Delay(_delayMs);
+            await Task.Delay(_delayMs, req.Cancel);
             req.OnProgress?.Invoke(p);
         }
         // Placeholder bytes with the right mime, like the Python mock.
@@ -99,9 +100,14 @@ public sealed class MockDriver : IMuseDriver
     public Task<Dictionary<string, object?>> Quota(Account account) => Task.FromResult(
         new Dictionary<string, object?>
         {
-            ["plan"] = "free", ["messages_used"] = 0, ["messages_limit"] = 100,
-            ["messages_remaining"] = 100, ["media_used"] = 0, ["media_limit"] = 20,
-            ["media_remaining"] = 20, ["resets_at"] = null,
+            ["plan"] = "free",
+            ["messages_used"] = 0,
+            ["messages_limit"] = 100,
+            ["messages_remaining"] = 100,
+            ["media_used"] = 0,
+            ["media_limit"] = 20,
+            ["media_remaining"] = 20,
+            ["resets_at"] = null,
         });
 
     // --- Solid PNG encoder, mirroring Python's struct/zlib version ---
@@ -183,6 +189,7 @@ public static class DriverFactory
     {
         "browser" => new BrowserDriver(settings),
         "http" => new HttpDriver(),
-        _ => new MockDriver(),
+        "mock" => new MockDriver(),
+        _ => throw new InvalidOperationException($"unknown driver '{settings.Driver}'"),
     };
 }

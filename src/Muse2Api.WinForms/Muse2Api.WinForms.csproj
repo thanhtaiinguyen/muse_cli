@@ -7,10 +7,25 @@
     <UseWindowsForms>true</UseWindowsForms>
     <!-- Allows compiling (not running) the Windows UI on Linux/macOS for CI checks. -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <AssemblyName>Muse2Api.WinForms</AssemblyName>
+    <AssemblyName>Muse</AssemblyName>
+    <Product>Muse Workspace</Product>
+    <Version>0.8.4</Version>
     <RootNamespace>Muse2Api.WinForms</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <ProjectReference Include="..\Muse2Api.Agent\Muse2Api.Agent.csproj" />
+    <ProjectReference Include="..\Muse2Api\Muse2Api.csproj" />
+    <ProjectReference Include="..\Muse2Api.Computer\Muse2Api.Computer.csproj" />
   </ItemGroup>
+  <!-- The WebView2 package also adds WPF; this application only uses WinForms. -->
+  <Target Name="RemoveUnusedWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+  <!-- Desktop calls these projects as libraries; expose one application to the user. -->
+  <Target Name="RemoveCompanionLaunchers" AfterTargets="Publish">
+    <Delete Files="$(PublishDir)Muse2Api.exe;$(PublishDir)Muse2Api.Agent.exe" />
+  </Target>
 </Project>

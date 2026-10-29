@@ -4,219 +4,150 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace Muse2Api.WinForms;
 
-/// <summary>
-/// Đăng nhập muse.ai và nạp tài khoản vào gateway — thiết kế:
-/// <list type="number">
-/// <item>Người dùng đăng nhập <b>trực tiếp trên trang muse.ai</b> hiển thị
-/// trong WebView2 (Edge) của cửa sổ này. UI không bao giờ hỏi, đọc hay gửi
-/// mật khẩu đi đâu cả: mật khẩu chỉ được gõ vào trang muse.ai, SSO/2FA
-/// (nếu có) cũng do chính trang đó xử lý.</item>
-/// <item>Sau mỗi lần chuyển trang, UI đọc cookie của muse.ai qua
-/// <c>CoreWebView2.CookieManager</c> (không scrape DOM, không chạy JS vào
-/// trang). Chỉ khi đủ cookie phiên bắt buộc mới cho nạp:
-/// <c>hatch_sess</c> + <c>hatch_native_auth_device</c>; tuỳ chọn
-/// <c>hatch_gw</c>, <c>hatch_vml</c> nếu có.</item>
-/// <item>Nhấn "Nạp tài khoản": UI gửi <b>chỉ danh sách cookie phiên đó</b>
-/// tới gateway <b>local</b> đã cấu hình, qua <c>POST /admin/accounts</c>
-/// với admin key. Gateway lưu vào <c>data/accounts.json</c> và trả về
-/// cookie đã che (dạng <c>secr...3456</c>). UI chỉ hiển thị tên cookie
-/// và kết quả đó, <b>không bao giờ hiển thị giá trị cookie đầy đủ</b>.</item>
-/// <item>Phiên WebView2 được lưu riêng trong
-/// <c>%LOCALAPPDATA%\Muse2Api.WinForms\WebView2</c> nên lần sau mở lại
-/// không cần đăng nhập lại; nút "Xóa phiên đăng nhập" sẽ xoá hết cookie
-/// trong đó. Nếu máy chưa có Edge WebView2 Runtime, form báo rõ và
-/// người dùng dùng cách dán cookie thủ công ở tab Quản lý.</item>
-/// </list>
-/// </summary>
+/// <summary>Sign in on Muse's own page; connect the desktop automatically once the session exists.</summary>
 public sealed class LoginForm : Form
 {
     public static readonly string[] RequiredCookies = { "hatch_sess", "hatch_native_auth_device" };
     public static readonly string[] OptionalCookies = { "hatch_gw", "hatch_vml" };
     public const string MuseSite = "https://muse.ai";
-
-    /// <summary>Id of the account just loaded, if LoadAccount succeeded.
-    /// MainForm uses it to pre-select the account for an immediate health check.</summary>
     public string? LastAccountId { get; private set; }
-
     private readonly GatewayClient _client;
-    private readonly Func<string> _url;
-    private readonly Func<string> _adminKey;
-    private WebView2 _web = null!;
-    private TextBox _label = null!;
-    private Label _status = null!;
-    private Button _loadBtn = null!;
-    private Button _clearBtn = null!;
-    private System.Windows.Forms.Timer _poll = null!;
-    private bool _refreshing;
+    private readonly Func<string> _url, _adminKey;
+    private readonly string _accountLabel;
+    private readonly WebView2 _web = new() { Dock = DockStyle.Fill };
+    private readonly Label _status = DesktopTheme.Label("Đang mở trang đăng nhập…", 10, DesktopTheme.Muted);
+    private readonly CleanButton _retry = new() { Text = "Thử lại", Width = 100, Visible = false };
+    private readonly CleanButton _switch = new() { Text = "Tài khoản khác", Width = 150, Quiet = true };
+    private readonly System.Windows.Forms.Timer _poll = new() { Interval = 2000 };
+    private bool _refreshing, _loading, _failed;
+    private readonly bool _clearExistingSession;
+    private readonly Muse2Api.Account? _savedAccount;
+    private bool _sessionVerified;
+    private DateTime _nextSessionCheck;
+    private readonly string _verificationNonce = Guid.NewGuid().ToString("N");
 
-    public LoginForm(GatewayClient client, Func<string> url, Func<string> adminKey, string defaultLabel = "")
+    public LoginForm(GatewayClient client, Func<string> url, Func<string> adminKey, string defaultLabel = "Tài khoản cá nhân", bool clearExistingSession = false, Muse2Api.Account? savedAccount = null)
     {
-        _client = client;
-        _url = url;
-        _adminKey = adminKey;
-        Text = "muse2api — Đăng nhập muse.ai";
-        Size = new Size(1000, 700);
-        StartPosition = FormStartPosition.CenterParent;
-
-        var top = new Panel { Dock = DockStyle.Top, Height = 80 };
-        top.Controls.Add(new Label { Text = "Nhãn tài khoản:", Location = new Point(10, 12), AutoSize = true });
-        _label = new TextBox { Location = new Point(120, 10), Width = 220, Text = defaultLabel };
-        top.Controls.Add(_label);
-        _loadBtn = new Button { Text = "Nạp tài khoản này vào gateway", Location = new Point(350, 8), Width = 230, Enabled = false };
-        _loadBtn.Click += async (_, _) => await LoadAccount();
-        top.Controls.Add(_loadBtn);
-        _clearBtn = new Button { Text = "Xóa phiên đăng nhập", Location = new Point(590, 8), Width = 160 };
-        _clearBtn.Click += (_, _) => ClearSession();
-        top.Controls.Add(_clearBtn);
-        var refreshBtn = new Button { Text = "Kiểm tra lại cookie", Location = new Point(760, 8), Width = 150 };
-        refreshBtn.Click += async (_, _) => await RefreshStatus();
-        top.Controls.Add(refreshBtn);
-        // muse.ai là SPA: đăng nhập xong có thể không tải lại trang hoàn toàn,
-        // nên ngoài NavigationCompleted, UI tự kiểm tra cookie mỗi 3 giây.
-        _poll = new System.Windows.Forms.Timer { Interval = 3000 };
-        _poll.Tick += async (_, _) => await RefreshStatus();
-        FormClosed += (_, _) => _poll.Stop();
-        _status = new Label
+        _client = client; _url = url; _adminKey = adminKey;
+        _clearExistingSession = clearExistingSession;
+        _savedAccount = savedAccount;
+        _accountLabel = string.IsNullOrWhiteSpace(defaultLabel) ? "Tài khoản cá nhân" : defaultLabel;
+        Text = "Kết nối tài khoản Muse"; Size = new Size(1060, 800); MinimumSize = new Size(800, 620);
+        StartPosition = FormStartPosition.CenterParent; Font = DesktopTheme.Body; BackColor = DesktopTheme.Background;
+        var layout = DesktopTheme.Column(new(SizeType.Absolute, 75), new(SizeType.Percent, 100), new(SizeType.Absolute, 55));
+        var heading = DesktopTheme.Column(new(SizeType.Absolute, 35), new(SizeType.Absolute, 28)); heading.Padding = new Padding(18, 6, 18, 4); heading.BackColor = DesktopTheme.Background;
+        heading.Controls.Add(DesktopTheme.Label("Đăng nhập tài khoản Muse", 17, bold: true), 0, 0);
+        heading.Controls.Add(DesktopTheme.Label("Đăng nhập ngay trên trang Muse bên dưới. Ứng dụng sẽ tự lưu kết nối khi bạn hoàn tất.", 10, DesktopTheme.Muted), 0, 1);
+        layout.Controls.Add(heading, 0, 0); layout.Controls.Add(_web, 0, 1);
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, Padding = new Padding(18, 6, 18, 6), BackColor = DesktopTheme.Background };
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        footer.Controls.Add(_status, 0, 0); footer.Controls.Add(_retry, 1, 0); footer.Controls.Add(_switch, 2, 0); layout.Controls.Add(footer, 0, 2); Controls.Add(layout);
+        _switch.Click += (_, _) =>
         {
-            Location = new Point(10, 42), Width = 960, Height = 30, AutoSize = false,
-            Text = "Đang mở trang đăng nhập muse.ai... Hãy đăng nhập trong trang này (mật khẩu chỉ gõ vào trang muse.ai).",
+            if (_web.CoreWebView2 is null || _loading || _refreshing) return;
+            _poll.Stop(); _failed = false;
+            _sessionVerified = false; _nextSessionCheck = DateTime.MinValue;
+            _web.CoreWebView2.CookieManager.DeleteAllCookies();
+            _web.CoreWebView2.Navigate(MuseSite);
+            _status.Text = "Đăng nhập tài khoản khác trên trang Muse."; _poll.Start();
         };
-        top.Controls.Add(_status);
-        Controls.Add(top);
-
-        _web = new WebView2 { Dock = DockStyle.Fill };
-        Controls.Add(_web);
+        _retry.Click += async (_, _) => { _failed = false; _retry.Visible = false; if (_web.CoreWebView2 is null) await InitWebView(); else await RefreshStatus(); };
+        _poll.Tick += async (_, _) => await RefreshStatus();
+        FormClosed += (_, _) => { _poll.Stop(); _poll.Dispose(); };
         Load += async (_, _) => await InitWebView();
     }
-
-    private string UserDataFolder => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "Muse2Api.WinForms", "WebView2");
 
     private async Task InitWebView()
     {
         try
         {
-            var env = await CoreWebView2Environment.CreateAsync(null, UserDataFolder);
-            await _web.EnsureCoreWebView2Async(env);
+            var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "WebView2");
+            var environment = await CoreWebView2Environment.CreateAsync(null, data);
+            await _web.EnsureCoreWebView2Async(environment);
+            if (IsDisposed) return;
+            _web.CoreWebView2.WebMessageReceived += async (_, message) =>
+            {
+                try
+                {
+                    if (!Uri.TryCreate(message.Source, UriKind.Absolute, out var source) || source.Host != "muse.ai") return;
+                    var result = JsonNode.Parse(message.WebMessageAsJson);
+                    if (result?["kind"]?.ToString() != "muse-session-check" || result?["nonce"]?.ToString() != _verificationNonce) return;
+                    _sessionVerified = result?["authenticated"]?.GetValue<bool>() == true;
+                    if (_sessionVerified) await RefreshStatus();
+                    else if (!IsDisposed) _status.Text = "Phiên đã lưu chưa được Muse xác nhận. Đăng nhập trên trang nếu được yêu cầu; ứng dụng không tự lấy mã mới.";
+                }
+                catch (Exception) { /* A page message cannot break the login form. */ }
+            };
+            if (_clearExistingSession) _web.CoreWebView2.CookieManager.DeleteAllCookies();
+            else if (_savedAccount is not null)
+            {
+                // Session cookies may be absent from a fresh WebView process even
+                // though the desktop still has a valid saved login.
+                var manager = _web.CoreWebView2.CookieManager;
+                var existing = await manager.GetCookiesAsync(MuseSite);
+                if (RequiredCookies.Any(name => !existing.Any(c => c.Name == name && c.Value.Length > 0)))
+                    foreach (var (name, value) in _savedAccount.Cookies.Where(kv => RequiredCookies.Contains(kv.Key) || OptionalCookies.Contains(kv.Key)))
+                    {
+                        var cookie = manager.CreateCookie(name, value, ".muse.ai", "/"); cookie.IsSecure = true;
+                        if (_savedAccount.CookieExpires.GetValueOrDefault(name) is var expiry && expiry > DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                            cookie.Expires = DateTimeOffset.FromUnixTimeSeconds(expiry).UtcDateTime;
+                        manager.AddOrUpdateCookie(cookie);
+                    }
+            }
             _web.CoreWebView2.NavigationCompleted += async (_, _) => await RefreshStatus();
             _web.CoreWebView2.Navigate(MuseSite);
+            _status.Text = "Đang chờ bạn đăng nhập. Bạn chỉ cần thao tác trên trang Muse.";
             _poll.Start();
         }
-        catch (Exception ex)
+        catch
         {
-            // Thiếu Edge WebView2 Runtime: báo rõ, không crash, để người dùng
-            // quay lại cách dán cookie thủ công.
-            MessageBox.Show(
-                "Không khởi động được trình duyệt nhúng (WebView2).\n\n"
-                + $"Lỗi: {ex.Message}\n\n"
-                + "Hãy cài Edge WebView2 Runtime (miễn phí, có sẵn trên Windows 10/11) từ:\n"
-                + "https://developer.microsoft.com/microsoft-edge/webview2/\n"
-                + "rồi mở lại cửa sổ này. Hoặc dùng cách dán cookie thủ công ở tab Quản lý.",
-                "Thiếu WebView2 Runtime", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            Close();
+            if (IsDisposed) return;
+            _status.Text = "Chưa mở được cửa sổ đăng nhập. Hãy kiểm tra Edge WebView2 trên máy rồi bấm Thử lại.";
+            _retry.Visible = true;
         }
-    }
-
-    private async Task<List<CoreWebView2Cookie>> SessionCookies()
-    {
-        if (_web.CoreWebView2 is null) return new List<CoreWebView2Cookie>();
-        var all = await _web.CoreWebView2.CookieManager.GetCookiesAsync(MuseSite);
-        var wanted = RequiredCookies.Concat(OptionalCookies).ToHashSet(StringComparer.Ordinal);
-        return all.Where(c => wanted.Contains(c.Name)).ToList();
     }
 
     private async Task RefreshStatus()
     {
-        if (_refreshing || _web.CoreWebView2 is null || IsDisposed) return;
+        if (_refreshing || _loading || _failed || IsDisposed || _web.CoreWebView2 is null) return;
         _refreshing = true;
         try
         {
-            var cookies = await SessionCookies();
-            var names = cookies.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
-            var missing = RequiredCookies.Where(r => !names.Contains(r)).ToList();
-            if (missing.Count == 0)
+            var cookies = await _web.CoreWebView2.CookieManager.GetCookiesAsync(MuseSite);
+            if (IsDisposed) return;
+            if (RequiredCookies.Any(name => !cookies.Any(c => c.Name == name && c.Value.Length > 0))) return;
+            if (!_sessionVerified)
             {
-                _status.Text = $"Đã đăng nhập muse.ai. Cookie phiên có: {string.Join(", ", names)}. "
-                    + "Bấm \"Nạp tài khoản\" để đưa tài khoản này vào gateway.";
-                _loadBtn.Enabled = _adminKey().Length > 0;
-                if (_adminKey().Length == 0)
-                    _status.Text += " (Chưa nhập admin key ở tab Server nên chưa nạp được.)";
-            }
-            else
-            {
-                _status.Text = $"Chưa đăng nhập xong. Còn thiếu cookie: {string.Join(", ", missing)}. "
-                    + "Hãy đăng nhập trong trang này, rồi đợi trang tải xong.";
-                _loadBtn.Enabled = false;
-            }
-        }
-        catch (Exception ex)
-        {
-            _status.Text = $"Không đọc được cookie: {ex.Message}";
-            _loadBtn.Enabled = false;
-        }
-        finally { _refreshing = false; }
-    }
-
-    private async Task LoadAccount()
-    {
-        var label = _label.Text.Trim();
-        if (label.Length == 0)
-        {
-            MessageBox.Show("Hãy nhập nhãn tài khoản (ví dụ: acc-chinh) trước khi nạp.",
-                "Thiếu nhãn", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        _loadBtn.Enabled = false;
-        _status.Text = "Đang nạp tài khoản vào gateway...";
-        try
-        {
-            var cookies = await SessionCookies();
-            var missingReq = RequiredCookies
-                .Where(r => cookies.All(c => c.Name != r)).ToList();
-            if (missingReq.Count > 0)
-            {
-                _status.Text = $"Chưa đủ cookie phiên, còn thiếu: {string.Join(", ", missingReq)}. "
-                    + "Hãy đăng nhập xong trong trang này rồi bấm \"Kiểm tra lại cookie\".";
-                _loadBtn.Enabled = false;
+                if (DateTime.UtcNow < _nextSessionCheck || !Uri.TryCreate(_web.Source?.AbsoluteUri, UriKind.Absolute, out var source) || source.Host != "muse.ai") return;
+                _nextSessionCheck = DateTime.UtcNow.AddSeconds(15);
+                _status.Text = "Đang kiểm tra và khôi phục phiên Muse đã lưu…";
+                var nonce = System.Text.Json.JsonSerializer.Serialize(_verificationNonce);
+                await _web.CoreWebView2.ExecuteScriptAsync("(async()=>{const c=new AbortController();const timer=setTimeout(()=>c.abort(),8000);try{const r=await fetch('/api/session',{credentials:'include',cache:'no-store',signal:c.signal});const b=r.ok?await r.json():{};window.chrome.webview.postMessage({kind:'muse-session-check',nonce:" + nonce + ",authenticated:r.ok&&b.status==='assigned'});}catch{window.chrome.webview.postMessage({kind:'muse-session-check',nonce:" + nonce + ",authenticated:false});}finally{clearTimeout(timer);}})()");
                 return;
             }
-            var arr = new JsonArray();
-            foreach (var c in cookies)
+            _loading = true;
+            _status.Text = "Đăng nhập thành công. Đang lưu kết nối…";
+            var array = new JsonArray();
+            foreach (var cookie in cookies.Where(c => RequiredCookies.Contains(c.Name) || OptionalCookies.Contains(c.Name)))
             {
-                var entry = new JsonObject { ["name"] = c.Name, ["value"] = c.Value };
-                // Cookie phiên (session) không có hạn: gateway sẽ tự cho hạn mặc định.
-                // CoreWebView2Cookie.Expires là DateTime (UTC) trong bản WebView2 này.
-                if (!c.IsSession)
-                    entry["expirationDate"] = new DateTimeOffset(
-                        DateTime.SpecifyKind(c.Expires, DateTimeKind.Utc)).ToUnixTimeSeconds();
-                arr.Add(entry);
+                var entry = new JsonObject { ["name"] = cookie.Name, ["value"] = cookie.Value };
+                if (!cookie.IsSession) entry["expirationDate"] = new DateTimeOffset(DateTime.SpecifyKind(cookie.Expires, DateTimeKind.Utc)).ToUnixTimeSeconds();
+                array.Add(entry);
             }
-            // Chỉ gửi giá trị cookie tới gateway local, không hiển thị lại ở UI.
-            var body = await _client.AddAccountWithCookies(_url(), _adminKey(), label, arr);
-            LastAccountId = body?["account"]?["id"]?.GetValue<string>();
-            var missing = body?["missing_cookies"] is JsonArray m
-                ? string.Join(", ", m.Select(x => x?.GetValue<string>() ?? "")) : "";
-            _status.Text = string.IsNullOrEmpty(missing)
-                ? $"Đã nạp tài khoản \"{label}\" vào gateway. Gateway đã che cookie khi trả về."
-                : $"Đã nạp tài khoản \"{label}\", nhưng gateway báo còn thiếu cookie: {missing}. "
-                  + "Hãy thử đăng nhập lại trong trang này rồi nạp lại.";
+            var result = await _client.AddAccountWithCookies(_url(), _adminKey(), _accountLabel, array);
+            if (IsDisposed) return;
+            LastAccountId = result?["account"]?["id"]?.GetValue<string>();
+            if (LastAccountId is null) throw new InvalidOperationException("No saved account returned");
+            _status.Text = "Đã kết nối. Bạn có thể bắt đầu làm việc với dự án.";
             DialogResult = DialogResult.OK;
         }
-        catch (Exception ex)
+        catch
         {
-            _status.Text = $"Nạp thất bại: {ex.Message} — kiểm tra gateway đã chạy và admin key đã đúng chưa, rồi thử lại (phiên đăng nhập vẫn còn trong cửa sổ này).";
-            _loadBtn.Enabled = true;
+            if (IsDisposed) return;
+            _failed = true;
+            _status.Text = "Đã đăng nhập nhưng chưa lưu được kết nối. Bấm Thử lại; bạn không cần đăng nhập lại.";
+            _retry.Visible = true;
         }
-    }
-
-    private void ClearSession()
-    {
-        if (_web.CoreWebView2 is null) return;
-        // CookieManager của WebView2 dùng API đồng bộ cho xóa.
-        _web.CoreWebView2.CookieManager.DeleteAllCookies();
-        _web.CoreWebView2.Navigate(MuseSite);
-        _status.Text = "Đã xóa cookie phiên. Hãy đăng nhập lại trong trang này nếu cần.";
-        _loadBtn.Enabled = false;
+        finally { _refreshing = false; _loading = false; }
     }
 }

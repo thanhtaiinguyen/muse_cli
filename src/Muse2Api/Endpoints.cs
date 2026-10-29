@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.3.0-dotnet.1";
+    public const string Version = "0.8.3";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -24,7 +24,7 @@ public static class Endpoints
                 ready,
                 driver = driver.ToDictionary(kv => kv.Key, kv => kv.Value),
                 accounts = pool,
-            });
+            }, statusCode: ready ? 200 : 503);
         });
 
         // ---------- models ----------
@@ -35,17 +35,21 @@ public static class Endpoints
             foreach (var m in ModelRegistry.Models.Values)
                 data.Add(new JsonObject
                 {
-                    ["id"] = m.Id, ["object"] = "model",
+                    ["id"] = m.Id,
+                    ["object"] = "model",
                     ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    ["owned_by"] = m.OwnedBy, ["kind"] = m.Kind,
+                    ["owned_by"] = m.OwnedBy,
+                    ["kind"] = m.Kind,
                 });
             foreach (var (alias, target) in ModelRegistry.Aliases)
                 data.Add(new JsonObject
                 {
-                    ["id"] = alias, ["object"] = "model",
+                    ["id"] = alias,
+                    ["object"] = "model",
                     ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     ["owned_by"] = "muse",
-                    ["kind"] = ModelRegistry.Models[target].Kind, ["alias_of"] = target,
+                    ["kind"] = ModelRegistry.Models[target].Kind,
+                    ["alias_of"] = target,
                 });
             return Results.Json(new JsonObject { ["object"] = "list", ["data"] = data });
         });
@@ -161,10 +165,12 @@ public static class Endpoints
         var flat = Prompt.Flatten(msgObjs);
         if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0)
             throw MuseException.Invalid("messages contain no text or images");
-        var images = await JsonHelp.LoadImageRefs(flat.Images);
-        var req = new ChatRequest(flat.Text, spec.Id, images,
-            JsonHelp.Str(body["user"]), Prompt.MessageTurns(msgObjs), ctx.RequestAborted);
+        var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
+        var localTools = JsonHelp.Bool(body["_muse_local_tools"]);
+        var req = new ChatRequest(localTools && s.Driver.Name == "browser" ? Prompt.ForLocalExecutor(msgObjs) : flat.Text, spec.Id, images,
+            JsonHelp.Str(body["user"]), Prompt.MessageTurns(msgObjs), ctx.RequestAborted, localTools, Prompt.ImageBatchId(msgObjs));
         var stream = JsonHelp.Bool(body["stream"]);
+        ctx.Items["stream"] = stream;
         var completionId = "chatcmpl-" + Guid.NewGuid().ToString("N")[..24];
         var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var outModel = modelName ?? spec.Id;
@@ -172,12 +178,13 @@ public static class Endpoints
         if (!stream)
         {
             var text = "";
-            var (chatStream, chatAccount) = s.Gateway.ChatStreamWithAccount(req);
-            ctx.Items["account_id"] = chatAccount;
+            var chatStream = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
             await foreach (var d in chatStream) text += d;
             await ctx.Response.WriteAsJsonAsync(new JsonObject
             {
-                ["id"] = completionId, ["object"] = "chat.completion", ["created"] = created,
+                ["id"] = completionId,
+                ["object"] = "chat.completion",
+                ["created"] = created,
                 ["model"] = outModel,
                 ["choices"] = new JsonArray(new JsonObject
                 {
@@ -198,102 +205,45 @@ public static class Endpoints
         ctx.Response.ContentType = "text/event-stream";
         ctx.Response.Headers.CacheControl = "no-cache";
         ctx.Response.Headers["X-Accel-Buffering"] = "no";
+        var chatStream2 = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
+        await using var enumerator = chatStream2.GetAsyncEnumerator(ctx.RequestAborted);
+        var first = await FirstDelta(enumerator, ctx, s.Settings.StreamHeartbeatInterval, ctx.RequestAborted);
         await using var writer = new StreamWriter(ctx.Response.Body, leaveOpen: true);
         JsonObject Chunk(JsonObject delta, string? finish) => new()
         {
-            ["id"] = completionId, ["object"] = "chat.completion.chunk", ["created"] = created,
+            ["id"] = completionId,
+            ["object"] = "chat.completion.chunk",
+            ["created"] = created,
             ["model"] = outModel,
             ["choices"] = new JsonArray(new JsonObject
             {
-                ["index"] = 0, ["delta"] = delta,
+                ["index"] = 0,
+                ["delta"] = delta,
                 ["finish_reason"] = finish is null ? null : JsonValue.Create(finish),
             }),
         };
         async Task Sse(JsonNode payload)
             => await writer.WriteAsync("data: " + payload.ToJsonString() + "\n\n");
-        var (chatStream2, chatAccount2) = s.Gateway.ChatStreamWithAccount(req);
-        ctx.Items["account_id"] = chatAccount2;
-        var enumerator = chatStream2.GetAsyncEnumerator(ctx.RequestAborted);
-        string first;
-        var heartbeat = s.Settings.StreamHeartbeatInterval;
-        if (heartbeat <= 0)
-        {
-            try
-            {
-                if (!await enumerator.MoveNextAsync()) first = "";
-                else first = enumerator.Current;
-            }
-            catch (MuseException)
-            {
-                await enumerator.DisposeAsync();
-                throw;
-            }
-        }
-        else
-        {
-            // Port of Python C4: with a heartbeat interval set, the 200 goes
-            // out immediately and ": keepalive" SSE comments are sent while
-            // the first upstream token is pending, so clients/proxies do not
-            // drop the idle SSE connection. Upstream errors then surface as
-            // SSE error events instead of HTTP codes, because headers have
-            // already been committed by the first heartbeat.
-            first = "";
-            var moveNext = enumerator.MoveNextAsync();
-            Exception? firstError = null;
-            var hasFirst = false;
-            while (!moveNext.IsCompleted)
-            {
-                var delay = Task.Delay(TimeSpan.FromSeconds(heartbeat), ctx.RequestAborted);
-                var done = await Task.WhenAny(moveNext.AsTask(), delay);
-                if (done == moveNext.AsTask()) break;
-                if (ctx.RequestAborted.IsCancellationRequested) break;
-                await writer.WriteAsync(": keepalive\n\n");
-                await writer.FlushAsync();
-            }
-            if (ctx.RequestAborted.IsCancellationRequested)
-            {
-                await enumerator.DisposeAsync();
-                return;
-            }
-            try
-            {
-                if (await moveNext) { first = enumerator.Current; hasFirst = true; }
-            }
-            catch (Exception ex) { firstError = ex; }
-            if (firstError is not null)
-            {
-                await enumerator.DisposeAsync();
-                var errBody = firstError is MuseException mex ? mex.ToBody()
-                    : new MuseException("internal error").ToBody();
-                await Sse(System.Text.Json.Nodes.JsonNode.Parse(
-                    System.Text.Json.JsonSerializer.Serialize(errBody))!);
-                await writer.WriteAsync("data: [DONE]\n\n");
-                await writer.FlushAsync();
-                return;
-            }
-            if (!hasFirst) first = "";
-        }
         var produced = first;
         await Sse(Chunk(new JsonObject { ["role"] = "assistant", ["content"] = produced }, null));
         await writer.FlushAsync();
-        try
+        while (await enumerator.MoveNextAsync())
         {
-            while (await enumerator.MoveNextAsync())
-            {
-                produced += enumerator.Current;
-                await Sse(Chunk(new JsonObject { ["content"] = enumerator.Current }, null));
-                await writer.FlushAsync();
-            }
+            produced += enumerator.Current;
+            await Sse(Chunk(new JsonObject { ["content"] = enumerator.Current }, null));
+            await writer.FlushAsync();
         }
-        finally { await enumerator.DisposeAsync(); }
         await Sse(Chunk(new JsonObject(), "stop"));
         if ((body["stream_options"] as JsonObject)?["include_usage"] is JsonValue uv
             && uv.TryGetValue<bool>(out var include) && include)
         {
             await Sse(new JsonObject
             {
-                ["id"] = completionId, ["object"] = "chat.completion.chunk", ["created"] = created,
-                ["model"] = outModel, ["choices"] = new JsonArray(),
+                ["id"] = completionId,
+                ["object"] = "chat.completion.chunk",
+                ["created"] = created,
+                ["model"] = outModel,
+                ["choices"] = new JsonArray(),
                 ["usage"] = new JsonObject
                 {
                     ["prompt_tokens"] = JsonHelp.ApproxTokens(flat.Text),
@@ -304,6 +254,37 @@ public static class Endpoints
         }
         await writer.WriteAsync("data: [DONE]\n\n");
         await writer.FlushAsync();
+    }
+
+    private static async Task<string> FirstDelta(IAsyncEnumerator<string> enumerator, HttpContext ctx,
+        double heartbeat, CancellationToken cancel)
+    {
+        var pending = enumerator.MoveNextAsync().AsTask();
+        try
+        {
+            if (heartbeat > 0)
+            {
+                while (!pending.IsCompleted)
+                {
+                    using var timer = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+                    var delay = Task.Delay(TimeSpan.FromSeconds(heartbeat), timer.Token);
+                    if (await Task.WhenAny(pending, delay) == pending) { timer.Cancel(); break; }
+                    if (cancel.IsCancellationRequested) break;
+                    await ctx.Response.WriteAsync(": keepalive\n\n", cancel);
+                    await ctx.Response.Body.FlushAsync(cancel);
+                }
+            }
+            return await pending ? enumerator.Current : "";
+        }
+        catch
+        {
+            if (!pending.IsCompleted)
+            {
+                ctx.Abort();
+                try { await pending; } catch { }
+            }
+            throw;
+        }
     }
 
     // ---------- responses ----------
@@ -319,7 +300,7 @@ public static class Endpoints
         var flat = Prompt.Flatten(messages);
         if (string.IsNullOrEmpty(flat.Text) && flat.Images.Count == 0)
             throw MuseException.Invalid("input contains no text or images");
-        var images = await JsonHelp.LoadImageRefs(flat.Images);
+        var images = await JsonHelp.LoadImageRefs(flat.Images, ctx.RequestAborted);
         var req = new ChatRequest(flat.Text, spec.Id, images,
             JsonHelp.Str(body["user"]), Prompt.MessageTurns(messages), ctx.RequestAborted);
         var respId = "resp_" + Guid.NewGuid().ToString("N")[..24];
@@ -329,9 +310,12 @@ public static class Endpoints
 
         JsonObject MessageItem(string text) => new()
         {
-            ["id"] = msgId, ["type"] = "message", ["status"] = "completed", ["role"] = "assistant",
+            ["id"] = msgId,
+            ["type"] = "message",
+            ["status"] = "completed",
+            ["role"] = "assistant",
             ["content"] = new JsonArray(new JsonObject
-                { ["type"] = "output_text", ["annotations"] = new JsonArray(), ["text"] = text }),
+            { ["type"] = "output_text", ["annotations"] = new JsonArray(), ["text"] = text }),
         };
         JsonObject Usage(string output) => new()
         {
@@ -343,18 +327,24 @@ public static class Endpoints
         };
         JsonObject ResponseObject(string text, string status) => new()
         {
-            ["id"] = respId, ["object"] = "response", ["created_at"] = created,
-            ["model"] = outModel, ["status"] = status,
+            ["id"] = respId,
+            ["object"] = "response",
+            ["created_at"] = created,
+            ["model"] = outModel,
+            ["status"] = status,
             ["output"] = status == "completed" ? new JsonArray(MessageItem(text)) : new JsonArray(),
-            ["usage"] = Usage(text), ["parallel_tool_calls"] = true,
-            ["tool_choice"] = "auto", ["tools"] = new JsonArray(),
+            ["usage"] = Usage(text),
+            ["parallel_tool_calls"] = true,
+            ["tool_choice"] = "auto",
+            ["tools"] = new JsonArray(),
         };
 
-        if (!JsonHelp.Bool(body["stream"]))
+        var stream = JsonHelp.Bool(body["stream"]);
+        ctx.Items["stream"] = stream;
+        if (!stream)
         {
             var text = "";
-            var (chatStream, chatAccount) = s.Gateway.ChatStreamWithAccount(req);
-            ctx.Items["account_id"] = chatAccount;
+            var chatStream = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
             await foreach (var d in chatStream) text += d;
             await ctx.Response.WriteAsJsonAsync(ResponseObject(text, "completed"));
             return;
@@ -363,34 +353,43 @@ public static class Endpoints
         ctx.Response.ContentType = "text/event-stream";
         ctx.Response.Headers.CacheControl = "no-cache";
         ctx.Response.Headers["X-Accel-Buffering"] = "no";
-        await using var writer = new StreamWriter(ctx.Response.Body, leaveOpen: true);
         var seq = 0;
+        ctx.Items["response_failure"] = (Func<MuseException, JsonObject>)(error =>
+        {
+            var failed = ResponseObject("", "failed");
+            failed["error"] = JsonSerializer.SerializeToNode(error.ToBody()["error"]);
+            return new JsonObject { ["type"] = "response.failed", ["sequence_number"] = seq++, ["response"] = failed };
+        });
+        var chatStream2 = s.Gateway.ChatStream(req, id => ctx.Items["account_id"] = id);
+        await using var enumerator = chatStream2.GetAsyncEnumerator(ctx.RequestAborted);
+        var first = await FirstDelta(enumerator, ctx, s.Settings.StreamHeartbeatInterval, ctx.RequestAborted);
+        await using var writer = new StreamWriter(ctx.Response.Body, leaveOpen: true);
         async Task Sse(JsonObject payload)
         {
             payload["sequence_number"] = seq++;
-            await writer.WriteAsync("data: " + payload.ToJsonString() + "\n\n");
+            await writer.WriteAsync("event: " + JsonHelp.Str(payload["type"]) + "\ndata: " + payload.ToJsonString() + "\n\n");
             await writer.FlushAsync();
         }
-        var (chatStream2, chatAccount2) = s.Gateway.ChatStreamWithAccount(req);
-        ctx.Items["account_id"] = chatAccount2;
-        var enumerator = chatStream2.GetAsyncEnumerator(ctx.RequestAborted);
-        string first = "";
-        try { if (await enumerator.MoveNextAsync()) first = enumerator.Current; }
-        catch (MuseException) { await enumerator.DisposeAsync(); throw; }
         await Sse(new JsonObject { ["type"] = "response.created", ["response"] = ResponseObject("", "in_progress") });
         await Sse(new JsonObject { ["type"] = "response.in_progress", ["response"] = ResponseObject("", "in_progress") });
         await Sse(new JsonObject
         {
-            ["type"] = "response.output_item.added", ["output_index"] = 0,
+            ["type"] = "response.output_item.added",
+            ["output_index"] = 0,
             ["item"] = new JsonObject
             {
-                ["id"] = msgId, ["type"] = "message", ["status"] = "in_progress",
-                ["role"] = "assistant", ["content"] = new JsonArray(),
+                ["id"] = msgId,
+                ["type"] = "message",
+                ["status"] = "in_progress",
+                ["role"] = "assistant",
+                ["content"] = new JsonArray(),
             },
         });
         await Sse(new JsonObject
         {
-            ["type"] = "response.content_part.added", ["item_id"] = msgId, ["output_index"] = 0,
+            ["type"] = "response.content_part.added",
+            ["item_id"] = msgId,
+            ["output_index"] = 0,
             ["content_index"] = 0,
             ["part"] = new JsonObject { ["type"] = "output_text", ["text"] = "", ["annotations"] = new JsonArray() },
         });
@@ -398,25 +397,46 @@ public static class Endpoints
         if (produced.Length > 0)
             await Sse(new JsonObject
             {
-                ["type"] = "response.output_text.delta", ["item_id"] = msgId, ["output_index"] = 0,
-                ["content_index"] = 0, ["delta"] = produced, ["logprobs"] = new JsonArray(),
+                ["type"] = "response.output_text.delta",
+                ["item_id"] = msgId,
+                ["output_index"] = 0,
+                ["content_index"] = 0,
+                ["delta"] = produced,
+                ["logprobs"] = new JsonArray(),
             });
-        try
+        while (await enumerator.MoveNextAsync())
         {
-            while (await enumerator.MoveNextAsync())
+            produced += enumerator.Current;
+            await Sse(new JsonObject
             {
-                produced += enumerator.Current;
-                await Sse(new JsonObject
-                {
-                    ["type"] = "response.output_text.delta", ["item_id"] = msgId, ["output_index"] = 0,
-                    ["content_index"] = 0, ["delta"] = enumerator.Current, ["logprobs"] = new JsonArray(),
-                });
-            }
+                ["type"] = "response.output_text.delta",
+                ["item_id"] = msgId,
+                ["output_index"] = 0,
+                ["content_index"] = 0,
+                ["delta"] = enumerator.Current,
+                ["logprobs"] = new JsonArray(),
+            });
         }
-        finally { await enumerator.DisposeAsync(); }
         await Sse(new JsonObject
         {
-            ["type"] = "response.output_item.done", ["output_index"] = 0,
+            ["type"] = "response.output_text.done",
+            ["item_id"] = msgId,
+            ["output_index"] = 0,
+            ["content_index"] = 0,
+            ["text"] = produced,
+        });
+        await Sse(new JsonObject
+        {
+            ["type"] = "response.content_part.done",
+            ["item_id"] = msgId,
+            ["output_index"] = 0,
+            ["content_index"] = 0,
+            ["part"] = new JsonObject { ["type"] = "output_text", ["text"] = produced, ["annotations"] = new JsonArray() },
+        });
+        await Sse(new JsonObject
+        {
+            ["type"] = "response.output_item.done",
+            ["output_index"] = 0,
             ["item"] = MessageItem(produced),
         });
         await Sse(new JsonObject { ["type"] = "response.completed", ["response"] = ResponseObject(produced, "completed") });
@@ -464,8 +484,11 @@ public static class Endpoints
     // ---------- images ----------
     private static JsonObject ImageTaskView(BgTask task) => new()
     {
-        ["id"] = task.Id, ["object"] = "image.task", ["status"] = task.Status,
-        ["progress"] = task.Progress, ["created_at"] = (long)task.CreatedAt,
+        ["id"] = task.Id,
+        ["object"] = "image.task",
+        ["status"] = task.Status,
+        ["progress"] = task.Progress,
+        ["created_at"] = (long)task.CreatedAt,
         ["model"] = task.Request.GetValueOrDefault("model")?.ToString(),
         ["result"] = task.Result is null ? null : DictToJson(task.Result),
         ["error"] = task.Error is null ? null : DictToJson(task.Error),
@@ -473,8 +496,11 @@ public static class Endpoints
 
     private static JsonObject VideoTaskView(BgTask task) => new()
     {
-        ["id"] = task.Id, ["object"] = "video", ["status"] = task.Status,
-        ["progress"] = task.Progress, ["created_at"] = (long)task.CreatedAt,
+        ["id"] = task.Id,
+        ["object"] = "video",
+        ["status"] = task.Status,
+        ["progress"] = task.Progress,
+        ["created_at"] = (long)task.CreatedAt,
         ["model"] = task.Request.GetValueOrDefault("model")?.ToString(),
         ["result"] = task.Result is null ? null : DictToJson(task.Result),
         ["error"] = task.Error is null ? null : DictToJson(task.Error),
@@ -486,26 +512,30 @@ public static class Endpoints
         var body = await JsonHelp.ReadBody(ctx.Request);
         var prompt = JsonHelp.Str(body["prompt"])
             ?? throw MuseException.Invalid("prompt is required");
+        if (string.IsNullOrWhiteSpace(prompt)) throw MuseException.Invalid("prompt must not be empty");
+        if (JsonHelp.Str(body["background"]) == "transparent") throw MuseException.NotImplemented("transparent background is not supported");
         var spec = ModelRegistry.Resolve(JsonHelp.Str(body["model"]), "image");
         ctx.Items["model"] = body["model"]?.ToString() ?? spec.Id;
-        var n = Math.Clamp(JsonHelp.Int(body["n"], 1), 1, 4);
-        if (body["n"] is not null && (JsonHelp.Int(body["n"], 1) < 1 || JsonHelp.Int(body["n"], 1) > 4))
+        var n = JsonHelp.Int(body["n"], body["n"] is null ? 1 : -1);
+        if (n is < 1 or > 4)
             throw MuseException.Invalid("n must be between 1 and 4");
         var refs = new List<string>();
         if (body["image"] is JsonArray arr) refs.AddRange(arr.Select(x => JsonHelp.Str(x) ?? ""));
         else if (JsonHelp.Str(body["image"]) is { } single) refs.Add(single);
         if (refs.Count > 4)
             throw MuseException.Invalid("at most 4 reference images are supported");
-        var loaded = await JsonHelp.LoadImageRefs(refs.Where(r => r.Length > 0));
+        if (refs.Any(string.IsNullOrWhiteSpace)) throw MuseException.Invalid("reference images must be non-empty strings");
+        var loaded = await JsonHelp.LoadImageRefs(refs, ctx.RequestAborted);
         var format = JsonHelp.Str(body["response_format"]) ?? "url";
+        if (format is not ("url" or "b64_json")) throw MuseException.Invalid("response_format must be url or b64_json");
         var isAsync = JsonHelp.Bool(body["async"]);
         var baseUrl = JsonHelp.BaseUrl(ctx.Request, s.Settings);
 
-        async Task<JsonObject> Run()
+        async Task<JsonObject> Run(Action<int>? progress, CancellationToken cancel)
         {
             var (results, imageAccount) = await s.Gateway.GenerateImage(new ImageRequest(
-                prompt, spec.Id, JsonHelp.Str(body["size"]), n, loaded));
-            ctx.Items["account_id"] = imageAccount;
+                prompt, spec.Id, JsonHelp.Str(body["size"]), n, loaded, progress, cancel));
+            if (!isAsync) ctx.Items["account_id"] = imageAccount;
             var data = new JsonArray();
             foreach (var r in results)
             {
@@ -516,20 +546,24 @@ public static class Endpoints
             }
             return new JsonObject
             {
-                ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["data"] = data,
+                ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["data"] = data,
             };
         }
 
         if (!isAsync)
         {
-            await ctx.Response.WriteAsJsonAsync(await Run());
+            await ctx.Response.WriteAsJsonAsync(await Run(null, ctx.RequestAborted));
             return;
         }
         var task = s.Tasks.Submit("image", new Dictionary<string, object?>
         {
-            ["model"] = spec.Id, ["prompt"] = prompt, ["size"] = JsonHelp.Str(body["size"]),
-            ["n"] = n, ["references"] = refs.Count,
-        }, async _ => { var r = await Run(); return new Dictionary<string, System.Text.Json.Nodes.JsonNode?> { ["data"] = r["data"]?.DeepClone() }; });
+            ["model"] = spec.Id,
+            ["prompt"] = prompt,
+            ["size"] = JsonHelp.Str(body["size"]),
+            ["n"] = n,
+            ["references"] = refs.Count,
+        }, async (progress, cancel) => { var r = await Run(progress, cancel); return new Dictionary<string, System.Text.Json.Nodes.JsonNode?> { ["data"] = r["data"]?.DeepClone() }; });
         ctx.Items["task_id"] = task.Id;
         await ctx.Response.WriteAsJsonAsync(ImageTaskView(task));
     }
@@ -537,12 +571,14 @@ public static class Endpoints
     private static async Task ImagesEdit(HttpContext ctx, AppState s)
     {
         RequireApi(ctx, s);
-        var form = await ctx.Request.ReadFormAsync();
-        if (form.ContainsKey("mask"))
+        if (!ctx.Request.HasFormContentType) throw MuseException.Invalid("Content-Type must be multipart/form-data");
+        var form = await ctx.Request.ReadFormAsync(ctx.RequestAborted);
+        if (form.ContainsKey("mask") || form.Files.Any(f => f.Name == "mask"))
             throw MuseException.Invalid("mask is not supported; muse.ai cannot inpaint a region");
         var files = form.Files.Where(f => f.Name is "image" or "image[]").ToList();
         if (files.Count == 0)
             throw MuseException.Invalid("at least one image file is required (field 'image' or 'image[]')");
+        if (files.Count > 4) throw MuseException.Invalid("at most 4 reference images are supported");
         var prompt = form["prompt"].ToString();
         if (string.IsNullOrEmpty(prompt)) throw MuseException.Invalid("prompt is required");
         var nText = form["n"].ToString();
@@ -550,12 +586,14 @@ public static class Endpoints
         if (n < 1 || n > 4) throw MuseException.Invalid("n must be between 1 and 4");
         var format = form["response_format"].ToString();
         if (string.IsNullOrEmpty(format)) format = "url";
+        if (format is not ("url" or "b64_json")) throw MuseException.Invalid("response_format must be url or b64_json");
         var spec = ModelRegistry.Resolve(form["model"].ToString() is { Length: > 0 } m ? m : null, "image");
         var refs = new List<InputImage>();
         foreach (var f in files)
         {
+            if (f.Length is <= 0 or > MediaHelp.MaxImageBytes) throw MuseException.Invalid("image must be non-empty and at most 20 MiB");
             using var ms = new MemoryStream();
-            await f.CopyToAsync(ms);
+            await f.CopyToAsync(ms, ctx.RequestAborted);
             var mime = f.ContentType;
             if (!mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
                 mime = f.FileName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
@@ -564,7 +602,7 @@ public static class Endpoints
             refs.Add(new InputImage(ms.ToArray(), mime));
         }
         var (results, editAccount) = await s.Gateway.GenerateImage(new ImageRequest(
-            prompt, spec.Id, form["size"].ToString() is { Length: > 0 } sz ? sz : null, n, refs));
+            prompt, spec.Id, form["size"].ToString() is { Length: > 0 } sz ? sz : null, n, refs, Cancel: ctx.RequestAborted));
         ctx.Items["account_id"] = editAccount;
         var baseUrl = JsonHelp.BaseUrl(ctx.Request, s.Settings);
         var data = new JsonArray();
@@ -577,7 +615,8 @@ public static class Endpoints
         }
         await ctx.Response.WriteAsJsonAsync(new JsonObject
         {
-            ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["data"] = data,
+            ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            ["data"] = data,
         });
     }
 
@@ -587,28 +626,33 @@ public static class Endpoints
         var body = await JsonHelp.ReadBody(ctx.Request);
         var prompt = JsonHelp.Str(body["prompt"])
             ?? throw MuseException.Invalid("prompt is required");
+        if (string.IsNullOrWhiteSpace(prompt)) throw MuseException.Invalid("prompt must not be empty");
         var spec = ModelRegistry.Resolve(JsonHelp.Str(body["model"]), "video");
         ctx.Items["model"] = body["model"]?.ToString() ?? spec.Id;
         InputImage? firstFrame = null;
         var frameRef = JsonHelp.Str(body["image"]) ?? JsonHelp.Str(body["input_reference"]);
-        if (frameRef is not null) firstFrame = await MediaHelp.LoadImageRef(frameRef);
+        if (frameRef is not null) firstFrame = await MediaHelp.LoadImageRef(frameRef, ctx.RequestAborted);
         var baseUrl = JsonHelp.BaseUrl(ctx.Request, s.Settings);
         var duration = body["duration"] is not null ? JsonHelp.Int(body["duration"]) : JsonHelp.Int(body["seconds"]);
         if (duration is < 1 or > 60 && (body["duration"] is not null || body["seconds"] is not null))
             throw MuseException.Invalid("duration must be between 1 and 60");
         var task = s.Tasks.Submit("video", new Dictionary<string, object?>
         {
-            ["model"] = spec.Id, ["prompt"] = prompt, ["size"] = JsonHelp.Str(body["size"]),
-            ["duration"] = duration == 0 ? null : duration, ["has_first_frame"] = firstFrame is not null,
-        }, async progress =>
+            ["model"] = spec.Id,
+            ["prompt"] = prompt,
+            ["size"] = JsonHelp.Str(body["size"]),
+            ["duration"] = duration == 0 ? null : duration,
+            ["has_first_frame"] = firstFrame is not null,
+        }, async (progress, cancel) =>
         {
             var (result, _) = await s.Gateway.GenerateVideo(new VideoRequest(
                 prompt, spec.Id, JsonHelp.Str(body["size"]), duration == 0 ? null : duration,
-                firstFrame, progress));
+                firstFrame, progress, cancel));
             var name = s.Media.Save(result.Data, result.Mime, "vid");
             return new Dictionary<string, System.Text.Json.Nodes.JsonNode?>
             {
-                ["url"] = $"{baseUrl}/v1/media/{name}", ["mime"] = result.Mime,
+                ["url"] = $"{baseUrl}/v1/media/{name}",
+                ["mime"] = result.Mime,
                 ["width"] = result.Width is null ? null : System.Text.Json.Nodes.JsonValue.Create(result.Width.Value),
                 ["height"] = result.Height is null ? null : System.Text.Json.Nodes.JsonValue.Create(result.Height.Value),
             };
@@ -621,13 +665,13 @@ public static class Endpoints
     private static void MapAdmin(WebApplication app, AppState s)
     {
         var admin = app.MapGroup("/admin");
-        admin.MapGet("/status", (HttpContext ctx) =>
+        admin.MapGet("/status", async (HttpContext ctx) =>
         {
             RequireAdmin(ctx, s);
             return Results.Json(new JsonObject
             {
                 ["version"] = Version,
-                ["driver"] = JsonSerializer.SerializeToNode(s.Driver.Health().Result),
+                ["driver"] = JsonSerializer.SerializeToNode(await s.Driver.Health()),
                 ["capabilities"] = JsonSerializer.SerializeToNode(s.Driver.Capabilities),
                 ["accounts"] = JsonSerializer.SerializeToNode(s.Pool.Stats()),
             });
@@ -644,7 +688,8 @@ public static class Endpoints
             RequireAdmin(ctx, s);
             var body = await JsonHelp.ReadBody(ctx.Request);
             var acc = BuildAccount(body);
-            s.Pool.Upsert(acc);
+            if (JsonHelp.Bool(body["reuse_session"])) acc = s.Pool.UpsertSession(acc);
+            else s.Pool.Upsert(acc);
             return Results.Json(new JsonObject
             {
                 ["account"] = acc.Public(),
@@ -668,7 +713,9 @@ public static class Endpoints
                     s.Pool.Upsert(acc);
                     results.Add(new JsonObject
                     {
-                        ["index"] = i, ["ok"] = true, ["account"] = acc.Public(),
+                        ["index"] = i,
+                        ["ok"] = true,
+                        ["account"] = acc.Public(),
                         ["missing_cookies"] = new JsonArray(
                             Upstream.MissingSessionCookies(acc.Cookies).Select(c => (JsonNode?)c).ToArray()),
                     });
@@ -676,7 +723,7 @@ public static class Endpoints
                 catch (MuseException ex)
                 {
                     results.Add(new JsonObject
-                        { ["index"] = i, ["ok"] = false, ["error"] = ex.Message, ["code"] = ex.Code });
+                    { ["index"] = i, ["ok"] = false, ["error"] = ex.Message, ["code"] = ex.Code });
                 }
             }
             return Results.Json(new JsonObject { ["data"] = results });
@@ -695,14 +742,16 @@ public static class Endpoints
                 acc.LastError = null;
             }
             if (body["cookie_expires"] is JsonObject expires)
-                acc.CookieExpires = expires.ToDictionary(kv => kv.Key, kv => (long)JsonHelp.Int(kv.Value));
+                acc.CookieExpires = expires.ToDictionary(kv => kv.Key, kv => JsonHelp.Long(kv.Value));
             s.Pool.Upsert(acc);
+            if (body.ContainsKey("cookies") || body.ContainsKey("cookie_expires")) await s.Driver.InvalidateAccount(id);
             return Results.Json(new JsonObject { ["account"] = acc.Public() });
         });
-        admin.MapDelete("/accounts/{id}", (HttpContext ctx, string id) =>
+        admin.MapDelete("/accounts/{id}", async (HttpContext ctx, string id) =>
         {
             RequireAdmin(ctx, s);
             if (!s.Pool.Remove(id)) throw MuseException.NotFound($"account '{id}' not found");
+            await s.Driver.InvalidateAccount(id);
             return Results.Json(new JsonObject { ["deleted"] = id });
         });
         admin.MapPost("/accounts/{id}/reset", (HttpContext ctx, string id) =>
@@ -728,6 +777,12 @@ public static class Endpoints
             foreach (var (k, v) in info.Cookies) acc.Cookies[k] = v;
             foreach (var (k, v) in info.CookieExpires) acc.CookieExpires[k] = v;
             foreach (var (k, v) in info.Meta) acc.Meta[k] = v is null ? null : JsonValue.Create(v);
+            if (info.Ok)
+            {
+                acc.Status = AccountStatus.Active;
+                acc.CooldownUntil = 0;
+                acc.LastError = null;
+            }
             s.Pool.NoteWake(acc, info.Meta);
             s.Pool.Upsert(acc);
             return Results.Json(new JsonObject
@@ -773,13 +828,14 @@ public static class Endpoints
             JsonObject UsageFor(string id) => usage.TryGetValue(id, out var u)
                 ? new JsonObject
                 {
-                    ["total"] = (int)(u["total"] ?? 0), ["requests_24h"] = (int)(u["requests_24h"] ?? 0),
+                    ["total"] = (int)(u["total"] ?? 0),
+                    ["requests_24h"] = (int)(u["requests_24h"] ?? 0),
                     ["errors_24h"] = (int)(u["errors_24h"] ?? 0),
                     ["last_request_at"] = u["last_request_at"] is null ? null
                         : JsonValue.Create((double)u["last_request_at"]!),
                 }
                 : new JsonObject
-                    { ["total"] = 0, ["requests_24h"] = 0, ["errors_24h"] = 0, ["last_request_at"] = null };
+                { ["total"] = 0, ["requests_24h"] = 0, ["errors_24h"] = 0, ["last_request_at"] = null };
             var data = new JsonArray();
             foreach (var k in s.Keys.All())
             {
@@ -803,7 +859,8 @@ public static class Endpoints
             foreach (var u in s.Requests.KeyUsage()) arr.Add(JsonSerializer.SerializeToNode(u));
             return Results.Json(new JsonObject
             {
-                ["since"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 86400, ["data"] = arr,
+                ["since"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 86400,
+                ["data"] = arr,
             });
         });
         admin.MapPost("/keys", async (HttpContext ctx) =>
@@ -821,7 +878,11 @@ public static class Endpoints
             RequireAdmin(ctx, s);
             var key = s.Keys.Get(keyId) ?? throw MuseException.NotFound($"key '{keyId}' not found");
             var body = await JsonHelp.ReadBody(ctx.Request);
-            if (JsonHelp.Str(body["name"]) is { } name) key.Name = name.Trim();
+            if (JsonHelp.Str(body["name"]) is { } name)
+            {
+                if (string.IsNullOrWhiteSpace(name) || name.Length > 100) throw MuseException.Invalid("key name must be 1-100 characters");
+                key.Name = name.Trim();
+            }
             if (JsonHelp.Str(body["note"]) is { } note) key.Note = note;
             if (body["revoked"] is JsonValue rv && rv.TryGetValue<bool>(out var revoked)) key.Revoked = revoked;
             s.Keys.Save();
@@ -837,9 +898,10 @@ public static class Endpoints
         {
             RequireAdmin(ctx, s);
             var q = ctx.Request.Query;
-            double? since = double.TryParse(q["since"], out var sv) ? sv : null;
+            double? since = double.TryParse(q["since"], System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var sv) && double.IsFinite(sv) ? sv : null;
             var limit = int.TryParse(q["limit"], out var l) ? Math.Clamp(l, 1, 500) : 100;
-            var offset = int.TryParse(q["offset"], out var o) ? o : 0;
+            var offset = int.TryParse(q["offset"], out var o) ? Math.Max(0, o) : 0;
             var (rows, total) = s.Requests.Query(
                 q["key_id"].ToString() is { Length: > 0 } a ? a : null,
                 q["account_id"].ToString() is { Length: > 0 } b ? b : null,
@@ -849,13 +911,17 @@ public static class Endpoints
             var arr = new JsonArray();
             foreach (var r in rows) arr.Add(new JsonObject
             {
-                ["ts"] = r.Ts, ["method"] = r.Method, ["path"] = r.Path,
+                ["ts"] = r.Ts,
+                ["method"] = r.Method,
+                ["path"] = r.Path,
                 ["model"] = r.Model is null ? null : JsonValue.Create(r.Model),
                 ["key_id"] = r.KeyId is null ? null : JsonValue.Create(r.KeyId),
                 ["key_name"] = r.KeyName is null ? null : JsonValue.Create(r.KeyName),
                 ["account_id"] = r.AccountId is null ? null : JsonValue.Create(r.AccountId),
-                ["status_code"] = r.StatusCode, ["latency_ms"] = r.LatencyMs,
-                ["stream"] = r.Stream, ["poll"] = r.Poll,
+                ["status_code"] = r.StatusCode,
+                ["latency_ms"] = r.LatencyMs,
+                ["stream"] = r.Stream,
+                ["poll"] = r.Poll,
                 ["error"] = r.Error is null ? null : JsonValue.Create(r.Error),
                 ["client_ip"] = r.ClientIp is null ? null : JsonValue.Create(r.ClientIp),
                 ["task_id"] = r.TaskId is null ? null : JsonValue.Create(r.TaskId),
@@ -891,15 +957,16 @@ public static class Endpoints
         var acc = new Account
         {
             Label = JsonHelp.Str(body["label"]) ?? "",
-            Cookies = cookies, CookieExpires = expires,
+            Cookies = cookies,
+            CookieExpires = expires,
             Enabled = body["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var e) ? e : true,
         };
         foreach (var (k, v) in expires.ToList())
             if (body["cookie_expires"] is JsonObject extra && extra[k] is not null)
-                acc.CookieExpires[k] = JsonHelp.Int(extra[k]);
+                acc.CookieExpires[k] = JsonHelp.Long(extra[k]);
         if (body["cookie_expires"] is JsonObject extraAll)
             foreach (var (k, v) in extraAll)
-                if (cookies.ContainsKey(k)) acc.CookieExpires[k] = JsonHelp.Int(v);
+                if (cookies.ContainsKey(k)) acc.CookieExpires[k] = JsonHelp.Long(v);
         return acc;
     }
 
@@ -947,8 +1014,12 @@ public static class Endpoints
 
     private static JsonObject TaskJson(BgTask t) => new()
     {
-        ["id"] = t.Id, ["kind"] = t.Kind, ["status"] = t.Status, ["progress"] = t.Progress,
-        ["created_at"] = t.CreatedAt, ["updated_at"] = t.UpdatedAt,
+        ["id"] = t.Id,
+        ["kind"] = t.Kind,
+        ["status"] = t.Status,
+        ["progress"] = t.Progress,
+        ["created_at"] = t.CreatedAt,
+        ["updated_at"] = t.UpdatedAt,
         ["request"] = JsonSerializer.SerializeToNode(t.Request),
         ["result"] = t.Result is null ? null : DictToJson(t.Result),
         ["error"] = t.Error is null ? null : DictToJson(t.Error),
@@ -977,7 +1048,7 @@ public static class Endpoints
             $"muse2api_requests_window_server_errors{{window=\"{window}\"}} {data["server_errors"]}",
             "# HELP muse2api_requests_window_error_rate Failed requests as a fraction of the window total.",
             "# TYPE muse2api_requests_window_error_rate gauge",
-            $"muse2api_requests_window_error_rate{{window=\"{window}\"}} {data["error_rate"]}",
+            FormattableString.Invariant($"muse2api_requests_window_error_rate{{window=\"{window}\"}} {data["error_rate"]}"),
         };
         if (data["latency_ms"] is Dictionary<string, object?> lat)
             foreach (var (name, value) in new[] { ("p50", lat["p50"]), ("p95", lat["p95"]) })

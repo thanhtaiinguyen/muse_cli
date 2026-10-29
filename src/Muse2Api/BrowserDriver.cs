@@ -13,21 +13,21 @@ namespace Muse2Api;
 /// (<c>MUSE2API_ACCOUNT_MAX_CONCURRENCY=1</c> by default).
 /// </para>
 /// <para>
-/// <b>Setup on Windows:</b> after <c>dotnet restore</c>, install the browser once:
-/// <c>dotnet tool install --global Microsoft.Playwright.CLI</c> then
-/// <c>playwright install chromium</c>. Or set <c>MUSE2API_CHROMIUM_PATH</c> to an
+/// <b>Setup on Windows:</b> after building, install the matching browser with
+/// <c>pwsh src/Muse2Api/bin/Release/net8.0/playwright.ps1 install chromium</c>.
+/// Or set <c>MUSE2API_CHROMIUM_PATH</c> to an
 /// existing Chrome/Chromium executable, which Playwright will use instead.
 /// </para>
 /// <para>
-/// <b>Not verified live:</b> the Python driver itself was never verified against
-/// a real muse.ai account either, and this port has only been compiled and
-/// exercised against its own error paths (missing cookies, missing browser).
-/// Run it with a real account and expect the first DOM mismatches to land in
-/// <c>Dom.cs</c>, exactly as in the Python project.
+/// Local agent replies preserve rendered code fences and wait for a stable
+/// complete response before decoding tool JSON. The local read/edit/command
+/// round trip has been verified with a real Muse account; upstream UI changes
+/// may still require selector updates in <c>Dom.cs</c>.
 /// </para>
 /// </summary>
 public sealed class BrowserDriver : IMuseDriver
 {
+    public event Action<string>? Diagnostic;
     public string Name => "browser";
     public bool RequiresAccount => true;
     public DriverCapabilities Capabilities { get; } = new(
@@ -36,55 +36,67 @@ public sealed class BrowserDriver : IMuseDriver
 
     private const double PollInterval = 0.15;
     private const int StablePollsDone = 4;
-    private const int StablePollsForce = 12;
     private const int HotBubbleLimit = 16;
-    private const double QuotaCacheSeconds = 1800;
     private const double QuotaClickTimeout = 8;
     private const double QuotaReadTimeout = 12;
     private const double EscapePause = 0.1;
 
     private readonly Settings _settings;
+    private readonly BrowserSessionStore _sessions;
+    private readonly LocalConversationStore _localConversations;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _localGates = new();
+    private readonly HashSet<string> _resetContexts = new();
     private IPlaywright? _playwright;
     private IBrowser? _browser;
     private readonly Dictionary<string, IBrowserContext> _contexts = new();
+    private readonly Dictionary<string, string> _contextAuthHashes = new();
     private readonly Dictionary<string, List<BrowserTab>> _tabs = new();
     private readonly Dictionary<string, int> _opening = new();
-    private readonly Dictionary<string, Dictionary<string, object?>> _quotaCache = new();
-    private readonly Dictionary<string, SemaphoreSlim> _quotaLocks = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Dictionary<string, object?>> _quotaCache = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _quotaLocks = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _contextLocks = new();
+    private readonly SemaphoreSlim _startupLock = new(1, 1);
     private readonly object _lock = new();
 
-    public BrowserDriver(Settings settings) => _settings = settings;
+    public BrowserDriver(Settings settings) { _settings = settings; _sessions = new(settings.DataDir); _localConversations = new(settings.DataDir); }
 
     // ---------- lifecycle ----------
     public async Task StartupAsync()
     {
-        if (_browser is not null) return;
-        _playwright = await Playwright.CreateAsync();
-        var launch = new BrowserTypeLaunchOptions
+        await _startupLock.WaitAsync();
+        try
         {
-            Headless = _settings.Headless,
-            Args = new[]
+            if (_browser is not null) return;
+            _playwright = await Playwright.CreateAsync();
+            var launch = new BrowserTypeLaunchOptions
             {
+                Headless = _settings.Headless,
+                Args = new[]
+                {
                 "--no-first-run", "--no-default-browser-check", "--disable-dev-shm-usage",
                 "--disable-background-networking", "--autoplay-policy=no-user-gesture-required",
                 "--window-size=1440,2200",
             },
-        };
-        if (!string.IsNullOrEmpty(_settings.ChromiumPath)) launch.ExecutablePath = _settings.ChromiumPath;
-        if (!string.IsNullOrEmpty(_settings.BrowserProxy))
-            launch.Proxy = new Proxy { Server = _settings.BrowserProxy };
-        try
-        {
-            _browser = await _playwright.Chromium.LaunchAsync(launch);
+            };
+            if (!string.IsNullOrEmpty(_settings.ChromiumPath)) launch.ExecutablePath = _settings.ChromiumPath;
+            if (!string.IsNullOrEmpty(_settings.BrowserProxy))
+                launch.Proxy = new Proxy { Server = _settings.BrowserProxy };
+            try
+            {
+                _browser = await _playwright.Chromium.LaunchAsync(launch);
+            }
+            catch (Exception ex)
+            {
+                _playwright.Dispose();
+                _playwright = null;
+                throw new MuseException(
+                "Could not launch Playwright Chromium. Install the matching browser with: pwsh \""
+                + Path.Combine(AppContext.BaseDirectory, "playwright.ps1") + "\" install chromium "
+                    + $" (or set MUSE2API_CHROMIUM_PATH). Original error: {ex.Message}",
+                    500, "server_error", "browser_not_installed");
+            }
         }
-        catch (Exception ex)
-        {
-            throw new MuseException(
-                "Playwright Chromium is not installed. Run: dotnet tool install --global "
-                + "Microsoft.Playwright.CLI && playwright install chromium "
-                + $" (or set MUSE2API_CHROMIUM_PATH). Original error: {ex.Message}",
-                500, "server_error", "browser_not_installed");
-        }
+        finally { _startupLock.Release(); }
     }
 
     public async Task ShutdownAsync()
@@ -96,6 +108,8 @@ public sealed class BrowserDriver : IMuseDriver
         _playwright?.Dispose();
         _browser = null;
         _playwright = null;
+        lock (_lock) { _contexts.Clear(); _contextAuthHashes.Clear(); _resetContexts.Clear(); _tabs.Clear(); _opening.Clear(); }
+        _quotaCache.Clear();
     }
 
     public Task<Dictionary<string, object?>> Health()
@@ -104,8 +118,10 @@ public sealed class BrowserDriver : IMuseDriver
         lock (_lock) tabs = _tabs.Values.SelectMany(t => t).ToList();
         return Task.FromResult(new Dictionary<string, object?>
         {
-            ["driver"] = Name, ["ok"] = _browser is not null,
-            ["tabs"] = tabs.Count, ["busy_tabs"] = tabs.Count(t => t.Busy),
+            ["driver"] = Name,
+            ["ok"] = _browser is not null,
+            ["tabs"] = tabs.Count,
+            ["busy_tabs"] = tabs.Count(t => t.Busy),
         });
     }
 
@@ -122,15 +138,18 @@ public sealed class BrowserDriver : IMuseDriver
         public bool Busy { get; set; }
         public bool Stale { get; set; }
         public bool Closed { get; set; }
-        public bool HasState => Turns.Count > 0 || ThreadUrl.Length > 0;
+        public bool Local { get; set; }
+        public bool RateLimited { get; set; }
+        public bool HasState => Turns.Count > 0 || ThreadUrl.Length > 0 || Local && Hint is { Length: > 0 };
     }
 
-    private async Task<BrowserTab> Checkout(Account account, Func<BrowserTab, bool>? prefer)
+    private async Task<BrowserTab> Checkout(Account account, Func<BrowserTab, bool>? prefer, CancellationToken cancel = default)
     {
         var limit = Math.Max(1, _settings.AccountMaxConcurrency);
         var deadline = DateTime.UtcNow.AddSeconds(_settings.PoolAcquireTimeout);
         while (true)
         {
+            cancel.ThrowIfCancellationRequested();
             BrowserTab? match = null;
             bool canOpen;
             lock (_lock)
@@ -138,7 +157,7 @@ public sealed class BrowserDriver : IMuseDriver
                 var tabs = _tabs.GetValueOrDefault(account.Id) ?? new List<BrowserTab>();
                 _tabs[account.Id] = tabs;
                 tabs.RemoveAll(t => t.Closed);
-                var idle = tabs.Where(t => !t.Busy).ToList();
+                var idle = tabs.Where(t => !t.Busy && !t.Stale).ToList();
                 canOpen = tabs.Count + _opening.GetValueOrDefault(account.Id) < limit;
                 match = idle.FirstOrDefault(t => prefer is null || prefer(t));
                 if (match is null && idle.Count > 0 && !canOpen)
@@ -172,25 +191,35 @@ public sealed class BrowserDriver : IMuseDriver
 
     private void Checkin(BrowserTab tab)
     {
-        tab.Busy = false;
-        if (tab.Stale) _ = CloseTab(tab);
+        lock (_lock)
+        {
+            tab.Busy = false;
+            if (tab.Stale) _ = CloseTab(tab);
+        }
     }
 
     private async Task<IBrowserContext> GetContext(Account account)
     {
-        if (_browser is null) await StartupAsync();
-        lock (_lock)
+        var gate = _contextLocks.GetOrAdd(account.Id, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
         {
-            if (_contexts.TryGetValue(account.Id, out var existing)) return existing;
+            if (_browser is null) await StartupAsync();
+            lock (_lock)
+            {
+                if (_contexts.TryGetValue(account.Id, out var existing)) return existing;
+            }
+            if (_browser is null) throw new MuseException("browser is not started", 500);
+            var context = await _browser.NewContextAsync(new BrowserNewContextOptions
+            {
+                ViewportSize = new ViewportSize { Width = 1440, Height = 2200 },
+                StorageState = _sessions.Load(account),
+            });
+            await SetCookies(context, account);
+            lock (_lock) { _contexts[account.Id] = context; _contextAuthHashes[account.Id] = BrowserSessionStore.AuthenticationHash(account); }
+            return context;
         }
-        if (_browser is null) throw new MuseException("browser is not started", 500);
-        var context = await _browser.NewContextAsync(new BrowserNewContextOptions
-        {
-            ViewportSize = new ViewportSize { Width = 1440, Height = 2200 },
-        });
-        await SetCookies(context, account);
-        lock (_lock) _contexts[account.Id] = context;
-        return context;
+        finally { gate.Release(); }
     }
 
     private async Task<BrowserTab> OpenTab(Account account)
@@ -200,7 +229,13 @@ public sealed class BrowserDriver : IMuseDriver
                 $"account is missing session cookies: {string.Join(", ", missing)}");
         var context = await GetContext(account);
         var page = await context.NewPageAsync();
-        return new BrowserTab { AccountId = account.Id, Page = page };
+        var tab = new BrowserTab { AccountId = account.Id, Page = page };
+        page.Response += (_, response) =>
+        {
+            if (response.Status == 429 && Uri.TryCreate(response.Url, UriKind.Absolute, out var uri)
+                && uri.Host.Equals("muse.ai", StringComparison.OrdinalIgnoreCase) && uri.AbsolutePath.StartsWith("/api/", StringComparison.Ordinal)) tab.RateLimited = true;
+        };
+        return tab;
     }
 
     private async Task CloseTab(BrowserTab tab)
@@ -215,9 +250,10 @@ public sealed class BrowserDriver : IMuseDriver
             var tabs = _tabs.GetValueOrDefault(tab.AccountId) ?? new List<BrowserTab>();
             tabs.Remove(tab);
             last = tabs.Count == 0 && _opening.GetValueOrDefault(tab.AccountId) == 0;
-            if (last && _contexts.TryGetValue(tab.AccountId, out var ctx))
+            if (last && _resetContexts.Remove(tab.AccountId) && _contexts.TryGetValue(tab.AccountId, out var ctx))
             {
                 _contexts.Remove(tab.AccountId);
+                _contextAuthHashes.Remove(tab.AccountId);
                 context = ctx;
             }
         }
@@ -227,7 +263,6 @@ public sealed class BrowserDriver : IMuseDriver
 
     private static async Task SetCookies(IBrowserContext context, Account account)
     {
-        var floor = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600;
         var cookies = new List<Cookie>();
         foreach (var (name, value) in account.Cookies)
         {
@@ -235,9 +270,12 @@ public sealed class BrowserDriver : IMuseDriver
             var exp = account.CookieExpires.GetValueOrDefault(name);
             cookies.Add(new Cookie
             {
-                Name = name, Value = value, Domain = ".muse.ai", Path = "/",
+                Name = name,
+                Value = value,
+                Domain = ".muse.ai",
+                Path = "/",
                 Secure = true,
-                Expires = (float)(exp > floor ? exp : DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 7 * 86400),
+                Expires = exp > 0 ? exp : -1,
             });
         }
         if (cookies.Count > 0) await context.AddCookiesAsync(cookies);
@@ -246,6 +284,7 @@ public sealed class BrowserDriver : IMuseDriver
     private static void Forget(BrowserTab tab)
     {
         tab.Hint = null; tab.Turns = new(); tab.ImageCount = 0; tab.ThreadUrl = "";
+        tab.Local = false; tab.RateLimited = false;
     }
 
     private static void LoadHot(BrowserTab tab, Account account)
@@ -281,14 +320,15 @@ public sealed class BrowserDriver : IMuseDriver
     }
 
     // ---------- page helpers ----------
-    private static async Task<System.Text.Json.Nodes.JsonNode?> Eval(IPage page, string script)
+    private static async Task<System.Text.Json.Nodes.JsonNode?> Eval(IPage page, string script, CancellationToken cancel = default)
     {
         try
         {
-            var el = await page.EvaluateAsync<System.Text.Json.JsonElement>(script);
+            var el = await page.EvaluateAsync<System.Text.Json.JsonElement>(script).WaitAsync(TimeSpan.FromSeconds(10), cancel);
             return el.ValueKind == System.Text.Json.JsonValueKind.Undefined
                 ? null : System.Text.Json.Nodes.JsonNode.Parse(el.GetRawText());
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             return null;
@@ -311,9 +351,15 @@ public sealed class BrowserDriver : IMuseDriver
     private async Task<System.Text.Json.Nodes.JsonNode?> PageState(IPage page)
         => await Eval(page, Dom.PageState);
 
-    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab)
+    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default)
     {
-        var state = await Eval(tab.Page, Dom.ChatState) ?? new System.Text.Json.Nodes.JsonObject();
+        if (tab.RateLimited) throw UpstreamException.Quota("Muse returned rate limit (HTTP 429). Conversation retained; no automatic retry or replacement chat.");
+        if (tab.Page.IsClosed) throw UpstreamException.Timeout("Muse web page closed; stopped waiting. Conversation retained.");
+        var state = await Eval(tab.Page, Dom.ChatState, cancel)
+            ?? throw UpstreamException.Timeout("Muse web state unavailable; stopped waiting. Conversation retained.");
+        if (BoolNode(state, "rateLimited")) throw UpstreamException.Quota("Muse shows a rate limit notice. Conversation retained; no automatic retry or replacement chat.");
+        if (!string.IsNullOrWhiteSpace(Str(state, "error")))
+            throw UpstreamException.Timeout("Muse web stopped responding: " + Str(state, "error"));
         var tail = Str(state, "tail") ?? "";
         var low = tail.ToLowerInvariant();
         foreach (var hint in Dom.QuotaHints)
@@ -366,7 +412,7 @@ public sealed class BrowserDriver : IMuseDriver
         var state = await ChatState(tab);
         if (BoolNode(state, "generating")) return false;
         if (Dom.StallHints.Any(h => (Str(state, "tail") ?? "").Contains(h))) return false;
-        return IntNode(state, "agentCount") < HotBubbleLimit;
+        return tab.Local || IntNode(state, "agentCount") < HotBubbleLimit;
     }
 
     private async Task<bool> LiveContinuation(BrowserTab tab)
@@ -397,35 +443,38 @@ public sealed class BrowserDriver : IMuseDriver
         throw UpstreamException.Timeout("saved conversation did not become ready");
     }
 
-    private async Task Attach(BrowserTab tab, List<InputImage> images)
+    private async Task Attach(BrowserTab tab, List<InputImage> images, CancellationToken cancel = default)
     {
         for (var idx = 0; idx < images.Count; idx++)
         {
             var img = images[idx];
             var ext = img.Mime.Split('/').Last().Replace("jpeg", "jpg");
             var res = await Eval(tab.Page, Dom.AttachFile(
-                Convert.ToBase64String(img.Data), img.Mime, $"input_{idx}.{ext}"));
+                Convert.ToBase64String(img.Data), img.Mime, $"input_{idx}.{ext}"), cancel);
             if (!BoolNode(res, "ok"))
                 throw new UpstreamException($"failed to attach image: {Str(res, "err")}");
         }
-        if (images.Count > 0) await Task.Delay(1000);
+        if (images.Count > 0) await Task.Delay(1000, cancel);
     }
 
-    private async Task Send(BrowserTab tab, string prompt)
+    private async Task Send(BrowserTab tab, string prompt, CancellationToken cancel = default)
     {
-        var res = await Eval(tab.Page, Dom.FillInput(prompt));
+        cancel.ThrowIfCancellationRequested();
+        var res = await Eval(tab.Page, Dom.FillInput(prompt), cancel);
         if (!BoolNode(res, "ok"))
             throw new UpstreamException($"cannot fill chat input: {Str(res, "err")}");
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (DateTime.UtcNow < deadline)
         {
-            if (await Eval(tab.Page, Dom.ClickSend) is System.Text.Json.Nodes.JsonValue v
+            cancel.ThrowIfCancellationRequested();
+            if (await Eval(tab.Page, Dom.ClickSend, cancel) is System.Text.Json.Nodes.JsonValue v
                 && v.TryGetValue<string>(out var s) && s == "clicked") return;
-            await Task.Delay(100);
+            await Task.Delay(100, cancel);
         }
-        await tab.Page.Keyboard.PressAsync("Enter");
-        await Task.Delay(500);
-        var empty = await Eval(tab.Page, Dom.InputEmpty);
+        cancel.ThrowIfCancellationRequested();
+        await tab.Page.Keyboard.PressAsync("Enter").WaitAsync(TimeSpan.FromSeconds(10), cancel);
+        await Task.Delay(500, cancel);
+        var empty = await Eval(tab.Page, Dom.InputEmpty, cancel);
         if (empty is not System.Text.Json.Nodes.JsonValue ev || !ev.TryGetValue<bool>(out var isEmpty) || !isEmpty)
             throw new UpstreamException("send button not found and Enter did not submit");
     }
@@ -442,16 +491,56 @@ public sealed class BrowserDriver : IMuseDriver
         Account account, ChatRequest req)
     {
         var hint = req.ConversationHint ?? "";
-        var tab = await Checkout(account, t => t.HasState && (t.Hint ?? "") == hint);
+        var tab = await Checkout(account, t => t.HasState && (t.Hint ?? "") == hint, req.Cancel);
         var prompt = req.Prompt;
         var images = req.Images;
         try
         {
+            if (req.LocalTools)
+            {
+                if (string.IsNullOrWhiteSpace(hint)) throw MuseException.Invalid("Local tools require a stable conversation ID.");
+                var saved = _localConversations.Load(account.Id, hint);
+                var live = tab.Local && tab.Hint == hint && LocalConversationStore.IsThread(tab.Page.Url)
+                    && (string.IsNullOrEmpty(saved?.Url) || new Uri(saved.Url).AbsolutePath.TrimEnd('/') == new Uri(tab.Page.Url).AbsolutePath.TrimEnd('/'));
+                tab.Local = true; tab.RateLimited = false;
+                if (saved is not null || live)
+                {
+                    tab.Hint = hint;
+                    tab.ThreadUrl = live ? tab.Page.Url : saved!.Url;
+                    if (tab.ThreadUrl.Length == 0) throw UpstreamException.Refused("Previous Muse request has no confirmed thread URL. No replacement chat was created; check the existing chat before continuing.");
+                    if (!await OnThread(tab)) await OpenSaved(tab);
+                    prompt = Prompt.LocalContinuation(req.Turns);
+                    Diagnostic?.Invoke("local_conversation_reused");
+                }
+                else
+                {
+                    await NewThread(tab); tab.Local = true; tab.Hint = hint;
+                    Diagnostic?.Invoke("local_conversation_created");
+                }
+                var state = await ChatState(tab, req.Cancel);
+                var imageHash = images.Count == 0 ? "" : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(images.SelectMany(i => i.Data).ToArray()));
+                // A newly pasted image/capture gets a new ID even if its bytes
+                // match. Repeated context from subsequent tool rounds keeps its
+                // ID and must not upload the same attachment on every round.
+                if (req.ImageBatchId is { Length: > 0 }) imageHash = req.ImageBatchId + ":" + imageHash;
+                if (req.ImageBatchId is { Length: > 0 } && imageHash == saved?.ImageHash) images = new();
+                // Record ownership before submission, so an interrupted request
+                // never silently creates another upstream thread on the next run.
+                _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash);
+                await Attach(tab, images, req.Cancel);
+                await Send(tab, prompt, req.Cancel);
+                if (LocalConversationStore.IsThread(tab.Page.Url))
+                {
+                    tab.ThreadUrl = tab.Page.Url;
+                    _localConversations.Save(account.Id, hint, tab.ThreadUrl, true, imageHash);
+                }
+                return (tab, state);
+            }
             List<BrowserTab> others;
             lock (_lock) others = _tabs.GetValueOrDefault(account.Id, new()).Where(t => t != tab && t.HasState).ToList();
-            if (others.Count == 0) LoadHot(tab, account);
+            if (!req.LocalTools && others.Count == 0) LoadHot(tab, account);
             var sameOwner = (tab.Hint ?? "") == hint;
-            var follow = tab.Turns.Count > 0 && sameOwner
+            var follow = !req.LocalTools && tab.Turns.Count > 0 && sameOwner
                 ? Prompt.FollowupText(tab.Turns, req.Turns) : null;
             if (follow is not null && req.Images.Count >= tab.ImageCount
                 && (tab.ThreadUrl.Length > 0 || await LiveContinuation(tab)))
@@ -469,106 +558,137 @@ public sealed class BrowserDriver : IMuseDriver
                 await NewThread(tab);
             }
             var baseState = await ChatState(tab);
-            await Attach(tab, images);
-            await Send(tab, prompt);
+            await Attach(tab, images, req.Cancel);
+            await Send(tab, prompt, req.Cancel);
             return (tab, baseState);
         }
         catch (Exception)
         {
+            if (req.LocalTools) { tab.Stale = true; Checkin(tab); throw; }
             Forget(tab);
+            tab.Stale = true;
             Checkin(tab);
             throw;
         }
     }
 
     // ---------- chat ----------
-    public IAsyncEnumerable<string> ChatStream(Account account, ChatRequest req)
+    public async IAsyncEnumerable<string> ChatStream(Account account, ChatRequest req)
     {
-        var channel = System.Threading.Channels.Channel.CreateUnbounded<string>();
-        _ = Task.Run(async () =>
+        req.Cancel.ThrowIfCancellationRequested();
+        using var localGate = req.LocalTools ? await AcquireLocalGate(account.Id, req.ConversationHint, req.Cancel) : null;
+        var (tab, baseState) = await BeginChat(account, req);
+        var baseCount = IntNode(baseState, "agentCount");
+        var baseText = Str(baseState, "lastText") ?? "";
+        var started = DateTime.UtcNow;
+        var emitted = "";
+        string? last = null;
+        var stable = 0;
+        var gotFirst = false;
+        var finished = false;
+        var diagnosticAt = 0d;
+        var progressAt = 0d;
+        string? progress = null;
+        var sawGenerating = false;
+        double? stoppedAt = null;
+        try
         {
-            BrowserTab? tab = null;
-            System.Text.Json.Nodes.JsonNode? baseState = null;
-            try
+            while (true)
             {
-                (tab, baseState) = await BeginChat(account, req);
-            }
-            catch (Exception ex) { channel.Writer.TryComplete(ex); return; }
-            var baseCount = IntNode(baseState, "agentCount");
-            var baseText = Str(baseState, "lastText") ?? "";
-            var started = DateTime.UtcNow;
-            var emitted = "";
-            string? last = null;
-            var stable = 0;
-            var gotFirst = false;
-            var finished = false;
-            try
-            {
-                while (true)
+                req.Cancel.ThrowIfCancellationRequested();
+                var elapsed = (DateTime.UtcNow - started).TotalSeconds;
+                if (elapsed > _settings.ChatTimeout) throw UpstreamException.Timeout("assistant reply timed out");
+                if (!gotFirst && elapsed > _settings.FirstTokenTimeout) throw UpstreamException.Timeout("no first token from assistant");
+                await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
+                var st = await ChatState(tab, req.Cancel);
+                if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
+                else if (sawGenerating) stoppedAt ??= elapsed;
+                var snapshot = IntNode(st, "agentCount") + ":" + BoolNode(st, "generating") + ":" + (Str(st, "lastText") ?? "");
+                if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
+                if (gotFirst && elapsed - progressAt > _settings.ChatIdleTimeout)
+                    throw UpstreamException.Timeout("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
+                if (req.LocalTools && elapsed >= diagnosticAt)
                 {
-                    if (req.Cancel.IsCancellationRequested) { channel.Writer.Complete(); return; }
-                    var elapsed = (DateTime.UtcNow - started).TotalSeconds;
-                    if (elapsed > _settings.ChatTimeout)
-                        throw UpstreamException.Timeout("assistant reply timed out");
-                    if (!gotFirst && elapsed > _settings.FirstTokenTimeout)
-                        throw UpstreamException.Timeout("no first token from assistant");
-                    await Task.Delay(TimeSpan.FromSeconds(PollInterval));
-                    var st = await ChatState(tab);
-                    if (BoolNode(st, "approval")) { await DenyApprovals(tab); continue; }
-                    var text = Str(st, "lastText") ?? "";
-                    var isNew = IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
-                    if (!isNew || text.Length == 0)
-                    {
-                        if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
-                            throw UpstreamException.Timeout("upstream workspace is stuck connecting");
-                        continue;
-                    }
-                    gotFirst = true;
-                    if (text != last)
-                    {
-                        var delta = text.StartsWith(emitted, StringComparison.Ordinal)
-                            ? text[emitted.Length..] : text;
-                        if (delta.Length > 0)
-                        {
-                            emitted = text;
-                            await channel.Writer.WriteAsync(delta);
-                        }
-                        last = text; stable = 0;
-                    }
-                    else
-                    {
-                        stable++;
-                        if ((!BoolNode(st, "generating") && stable >= StablePollsDone)
-                            || stable >= StablePollsForce)
-                        {
-                            finished = true;
-                            break;
-                        }
-                    }
+                    Diagnostic?.Invoke($"local_reply_poll seconds={(int)elapsed} bubbles={IntNode(st, "agentCount")} baseline={baseCount} chars={(Str(st, "lastText") ?? "").Length} generating={BoolNode(st, "generating")}");
+                    diagnosticAt = elapsed + 10;
                 }
-            }
-            catch (Exception ex) { channel.Writer.TryComplete(ex); }
-            finally
-            {
-                if (finished)
+                if (BoolNode(st, "approval")) { await DenyApprovals(tab); continue; }
+                var text = Str(st, "lastText") ?? "";
+                var isNew = IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
+                if (!isNew || text.Length == 0)
                 {
-                    var url = "";
-                    for (var i = 0; i < 10; i++)
+                    if (stoppedAt is { } idleAt && elapsed - idleAt > 2)
+                        throw UpstreamException.Timeout("Muse web stopped responding without a completed reply. Conversation retained; no automatic resend.");
+                    if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
+                        throw UpstreamException.Timeout("upstream workspace is stuck connecting");
+                    continue;
+                }
+                gotFirst = true;
+                if (req.LocalTools)
+                {
+                    // Rendered Markdown may replace its DOM while streaming
+                    // (especially code fences/tool JSON). JSON cannot be
+                    // reconstructed from irreversible partial DOM deltas.
+                    if (text != last) { last = text; stable = 0; }
+                    else if (!BoolNode(st, "generating") && ++stable >= StablePollsDone)
                     {
-                        url = tab.Page.Url;
-                        if (IsThreadUrl(url)) break;
-                        await Task.Delay(200);
+                        Diagnostic?.Invoke($"local_reply_complete chars={text.Length}");
+                        finished = true;
+                        yield return text;
+                        break;
                     }
+                    else if (BoolNode(st, "generating")) stable = 0;
+                    continue;
+                }
+                if (text != last)
+                {
+                    // DOM re-renders may briefly shorten text. Wait until the
+                    // committed prefix returns rather than duplicating output.
+                    if (!text.StartsWith(emitted, StringComparison.Ordinal)) continue;
+                    var delta = text[emitted.Length..];
+                    emitted = text;
+                    last = text;
+                    stable = 0;
+                    if (delta.Length > 0) yield return delta;
+                }
+                else if (!BoolNode(st, "generating") && ++stable >= StablePollsDone)
+                {
+                    finished = true;
+                    break;
+                }
+                else if (BoolNode(st, "generating")) stable = 0;
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (req.LocalTools)
+                {
+                    var saved = _localConversations.Load(account.Id, req.ConversationHint!);
+                    var url = LocalConversationStore.IsThread(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "";
+                    _localConversations.Save(account.Id, req.ConversationHint!, url, !finished, saved?.ImageHash ?? "");
+                    tab.ThreadUrl = url; tab.Hint = req.ConversationHint; tab.Local = true; tab.Turns.Clear();
+                    if (!finished) tab.Stale = true;
+                }
+                else if (finished)
+                {
+                    var url = tab.Page.Url;
                     SaveHot(tab, account, req, IsThreadUrl(url) ? url : "");
                 }
-                else Forget(tab);
-                Checkin(tab);
-                if (finished) channel.Writer.Complete();
+                else { Forget(tab); tab.Stale = true; }
+                await SaveSession(account, tab.Page.Context);
             }
-        });
-        return channel.Reader.ReadAllAsync();
+            finally { Checkin(tab); }
+        }
     }
-
+    private async Task<IDisposable> AcquireLocalGate(string accountId, string? hint, CancellationToken cancel)
+    {
+        if (string.IsNullOrWhiteSpace(hint)) throw MuseException.Invalid("Local tools require a stable conversation ID.");
+        var gate = _localGates.GetOrAdd(accountId + ":" + hint, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancel); return new GateLease(gate);
+    }
+    private sealed class GateLease(SemaphoreSlim gate) : IDisposable { public void Dispose() => gate.Release(); }
     // ---------- media ----------
     private static string MediaPrompt(string prompt, string kind, string? size, int? duration = null)
     {
@@ -594,10 +714,9 @@ public sealed class BrowserDriver : IMuseDriver
         while (true)
         {
             var elapsed = (DateTime.UtcNow - started).TotalSeconds;
-            var busy = false;
-            if (elapsed >= timeout && !(busy && elapsed < timeout * 2.5)) break;
-            if (cancel.IsCancellationRequested) throw new OperationCanceledException();
-            await Task.Delay(600);
+            if (elapsed >= timeout * 2.5) break;
+            cancel.ThrowIfCancellationRequested();
+            await Task.Delay(600, cancel);
             var st = await ChatState(tab);
             if (BoolNode(st, "approval"))
             {
@@ -622,9 +741,10 @@ public sealed class BrowserDriver : IMuseDriver
                     ["h"] = lastAtt["h"] is System.Text.Json.Nodes.JsonValue hv && hv.TryGetValue<int>(out var h) ? h : 0,
                 };
             }
-            busy = BoolNode(st, "generating")
+            var busy = BoolNode(st, "generating")
                 || atts.Any(a => (a?["tid"]?.GetValue<string>() ?? "").Contains(kind));
             elapsed = (DateTime.UtcNow - started).TotalSeconds;
+            if (elapsed >= timeout && !busy) break;
             onProgress?.Invoke(Math.Min(95, (int)(elapsed / timeout * 100)));
             if (atts.Any(a => (a?["tid"]?.GetValue<string>() ?? "").Contains(kind)))
             {
@@ -654,7 +774,6 @@ public sealed class BrowserDriver : IMuseDriver
                 }
             }
             else textDoneAt = null;
-            if (elapsed >= timeout && !(busy && elapsed < timeout * 2.5)) break;
         }
         throw UpstreamException.Timeout($"{kind} generation timed out");
     }
@@ -705,6 +824,7 @@ public sealed class BrowserDriver : IMuseDriver
     {
         // Media always starts a fresh thread, so keep tabs holding a chat for chats.
         var t = tab;
+        var completed = false;
         try
         {
             await NewThread(t);
@@ -712,9 +832,15 @@ public sealed class BrowserDriver : IMuseDriver
             await Attach(t, images);
             await Send(t, prompt);
             var att = await WaitMedia(t, baseState, kind, timeout, onProgress, cancel);
-            return await Download(t, att, kind);
+            var result = await Download(t, att, kind);
+            completed = true;
+            return result;
         }
-        finally { Checkin(t); }
+        finally
+        {
+            if (!completed) t.Stale = true;
+            Checkin(t);
+        }
     }
 
     public async Task<List<MediaResult>> GenerateImage(Account account, ImageRequest req)
@@ -723,9 +849,9 @@ public sealed class BrowserDriver : IMuseDriver
         var results = new List<MediaResult>();
         for (var i = 0; i < Math.Max(1, req.N); i++)
         {
-            var tab = await Checkout(account, t => !t.HasState);
+            var tab = await Checkout(account, t => !t.HasState, req.Cancel);
             var r = await Generate(tab, account, prompt, req.References, "image",
-                _settings.ImageTimeout, req.OnProgress, CancellationToken.None);
+                _settings.ImageTimeout, req.OnProgress, req.Cancel);
             r = r with { RevisedPrompt = req.Prompt };
             results.Add(r);
         }
@@ -736,34 +862,68 @@ public sealed class BrowserDriver : IMuseDriver
     {
         var prompt = MediaPrompt(req.Prompt, "video", req.Size, req.Duration);
         var images = req.FirstFrame is null ? new List<InputImage>() : new List<InputImage> { req.FirstFrame };
-        var tab = await Checkout(account, t => !t.HasState);
+        var tab = await Checkout(account, t => !t.HasState, req.Cancel);
         return await Generate(tab, account, prompt, images, "video",
-            _settings.VideoTimeout, req.OnProgress, CancellationToken.None);
+            _settings.VideoTimeout, req.OnProgress, req.Cancel);
     }
 
     // ---------- session / quota ----------
     public async Task<SessionInfo> RenewSession(Account account)
     {
         var info = await Upstream.RenewSession(account.Cookies, _settings.WakeConfirmSeconds);
+        await InvalidateAccount(account.Id);
+        return info;
+    }
+
+    public async Task InvalidateAccount(string accountId)
+    {
         List<BrowserTab> tabs;
-        lock (_lock) tabs = _tabs.GetValueOrDefault(account.Id, new()).ToList();
+        lock (_lock) { tabs = _tabs.GetValueOrDefault(accountId, new()).ToList(); _resetContexts.Add(accountId); }
         foreach (var t in tabs) t.Stale = true;
         foreach (var t in tabs.Where(t => !t.Busy)) await CloseTab(t);
-        return info;
+        if (tabs.Count == 0)
+        {
+            IBrowserContext? context;
+            lock (_lock) { _contexts.Remove(accountId, out context); _resetContexts.Remove(accountId); _contextAuthHashes.Remove(accountId); }
+            if (context is not null) try { await context.CloseAsync(); } catch { }
+        }
+        _quotaCache.TryRemove(accountId, out _);
+    }
+
+    private async Task SaveSession(Account account, IBrowserContext context)
+    {
+        try
+        {
+            var cookies = await context.CookiesAsync(new[] { Upstream.Site }).WaitAsync(TimeSpan.FromSeconds(10));
+            if (Upstream.SessionCookies.Any(name => !cookies.Any(c => c.Name == name && c.Value.Length > 0))) return;
+            lock (_lock)
+                if (_contextAuthHashes.GetValueOrDefault(account.Id) != BrowserSessionStore.AuthenticationHash(account)) return;
+            var savedCookies = new Dictionary<string, string>(account.Cookies);
+            var savedExpires = new Dictionary<string, long>(account.CookieExpires);
+            foreach (var cookie in cookies.Where(c => Upstream.SessionCookies.Contains(c.Name) || Upstream.OptionalSessionCookies.Contains(c.Name)))
+            {
+                savedCookies[cookie.Name] = cookie.Value;
+                if (cookie.Expires > 0) savedExpires[cookie.Name] = (long)cookie.Expires;
+                else savedExpires.Remove(cookie.Name);
+            }
+            account.Cookies = savedCookies; account.CookieExpires = savedExpires;
+            lock (_lock) _contextAuthHashes[account.Id] = BrowserSessionStore.AuthenticationHash(account);
+            await _sessions.SaveAsync(account, await context.StorageStateAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        catch (Exception) { Diagnostic?.Invoke("session_save_failed"); }
     }
 
     public async Task<Dictionary<string, object?>> Quota(Account account)
     {
         if (_quotaCache.TryGetValue(account.Id, out var hit)
-            && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - Convert.ToDouble(hit["fetched_at"] ?? 0) < QuotaCacheSeconds)
+            && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - Convert.ToDouble(hit["fetched_at"] ?? 0) < _settings.QuotaCacheSeconds)
             return new Dictionary<string, object?>(hit);
-        var sem = _quotaLocks.GetValueOrDefault(account.Id);
-        if (sem is null) { sem = new SemaphoreSlim(1, 1); _quotaLocks[account.Id] = sem; }
+        var sem = _quotaLocks.GetOrAdd(account.Id, _ => new SemaphoreSlim(1, 1));
         await sem.WaitAsync();
         try
         {
             if (_quotaCache.TryGetValue(account.Id, out hit)
-                && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - Convert.ToDouble(hit["fetched_at"] ?? 0) < QuotaCacheSeconds)
+                && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - Convert.ToDouble(hit["fetched_at"] ?? 0) < _settings.QuotaCacheSeconds)
                 return new Dictionary<string, object?>(hit);
             var tab = await CheckoutIdle(account);
             Dictionary<string, object?> parsed;
@@ -835,10 +995,10 @@ public sealed class BrowserDriver : IMuseDriver
         {
             if (!await ClickJs(tab, Dom.QuotaSettingsEntry))
                 return new Dictionary<string, object?>(Dom.ParseUsageText(""))
-                    { ["error"] = "settings entry not found" };
+                { ["error"] = "settings entry not found" };
             if (!await ClickJs(tab, Dom.QuotaMenuItem))
                 return new Dictionary<string, object?>(Dom.ParseUsageText(""))
-                    { ["error"] = "settings menu item not found" };
+                { ["error"] = "settings menu item not found" };
             var deadline = DateTime.UtcNow.AddSeconds(QuotaReadTimeout);
             while (true)
             {

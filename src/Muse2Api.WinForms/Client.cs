@@ -4,12 +4,17 @@ using System.Text.Json.Nodes;
 namespace Muse2Api.WinForms;
 
 /// <summary>Stdlib-only HTTP client for the muse2api gateway (.NET or Python).
-/// No reference to the gateway project: this UI can control any local gateway.</summary>
+/// Deliberately uses no gateway types: this client can control any local gateway.</summary>
 public sealed class GatewayClient : IDisposable
 {
-    private readonly HttpClient _http = new() { Timeout = TimeSpan.FromMinutes(10) };
+    private readonly HttpClient _http = new(new HttpClientHandler { UseProxy = false }) { Timeout = TimeSpan.FromMinutes(10) };
 
-    public string BaseUrl(string host, int port) => $"http://{host}:{port}";
+    public string BaseUrl(string host, int port)
+    {
+        if (port is < 1 or > 65535) throw new ArgumentException("Port phải nằm trong khoảng 1–65535.");
+        if (host is "0.0.0.0" or "*" or "+" or "::" or "[::]") host = "127.0.0.1";
+        return new UriBuilder("http", host, port).Uri.GetLeftPart(UriPartial.Authority);
+    }
 
     private async Task<JsonNode?> Request(string url, string key, JsonObject? payload = null,
         HttpMethod? method = null)
@@ -36,7 +41,7 @@ public sealed class GatewayClient : IDisposable
         var list = new List<string>();
         if (body?["data"] is JsonArray arr)
             foreach (var m in arr)
-                if (m?["id"]?.GetValue<string>() is { } id) list.Add(id);
+                if (m?["kind"]?.GetValue<string>() == "chat" && m?["id"]?.GetValue<string>() is { } id) list.Add(id);
         return list;
     }
 
@@ -57,7 +62,8 @@ public sealed class GatewayClient : IDisposable
     public Task<JsonNode?> AddAccount(string url, string adminKey, string label, string cookies)
         => Request(url + "/admin/accounts", adminKey, new JsonObject
         {
-            ["label"] = label, ["cookies"] = cookies,
+            ["label"] = label,
+            ["cookies"] = cookies,
         });
 
     /// <summary>Same endpoint, but cookies as a structured list
@@ -66,7 +72,9 @@ public sealed class GatewayClient : IDisposable
     public Task<JsonNode?> AddAccountWithCookies(string url, string adminKey, string label, JsonArray cookies)
         => Request(url + "/admin/accounts", adminKey, new JsonObject
         {
-            ["label"] = label, ["cookies"] = cookies,
+            ["label"] = label,
+            ["cookies"] = cookies,
+            ["reuse_session"] = true,
         });
 
     /// <summary>Accounts the gateway knows, masked by the gateway itself.

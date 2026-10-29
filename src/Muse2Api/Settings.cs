@@ -17,6 +17,7 @@ public sealed class Settings
     public string SiteUrl { get; init; } = Env("SITE_URL", "https://muse.ai");
     public double ChatTimeout { get; init; } = EnvDouble("CHAT_TIMEOUT", 300);
     public double FirstTokenTimeout { get; init; } = EnvDouble("FIRST_TOKEN_TIMEOUT", 45);
+    public double ChatIdleTimeout { get; init; } = EnvDouble("CHAT_IDLE_TIMEOUT", 90);
     public double StreamHeartbeatInterval { get; init; } = EnvDouble("STREAM_HEARTBEAT_INTERVAL", 0);
     public double ImageTimeout { get; init; } = EnvDouble("IMAGE_TIMEOUT", 240);
     public double VideoTimeout { get; init; } = EnvDouble("VIDEO_TIMEOUT", 600);
@@ -45,6 +46,18 @@ public sealed class Settings
     public string RequestsFile => Path.Combine(DataDir, "requests.db");
     public string KeyFile => Path.Combine(DataDir, "api_key");
     public string KeysFile => Path.Combine(DataDir, "keys.json");
+
+    public void Validate()
+    {
+        if (Port is < 1 or > 65535) throw new InvalidOperationException("MUSE2API_PORT must be between 1 and 65535");
+        if (Driver is not ("mock" or "browser" or "http")) throw new InvalidOperationException("MUSE2API_DRIVER must be mock, browser or http");
+        if (PoolStrategy is not ("affinity" or "lru" or "round_robin")) throw new InvalidOperationException("invalid MUSE2API_POOL_STRATEGY");
+        if (AccountMaxConcurrency < 1 || MaxFailover < 0) throw new InvalidOperationException("account concurrency must be positive and max failover must be non-negative");
+        foreach (var value in new[] { ChatTimeout, FirstTokenTimeout, ChatIdleTimeout, ImageTimeout, VideoTimeout, PageReadyTimeout, KeepaliveInterval })
+            if (!double.IsFinite(value) || value <= 0) throw new InvalidOperationException("timeouts and intervals must be finite and positive");
+        foreach (var value in new[] { PoolAcquireTimeout, AccountCooldown, StreamHeartbeatInterval, RequestLogRetentionDays, MediaRetentionDays, QuotaCacheSeconds, WakeConfirmSeconds })
+            if (!double.IsFinite(value) || value < 0) throw new InvalidOperationException("retention, cooldown and optional intervals must be finite and non-negative");
+    }
 
     public void EnsureDirs()
     {

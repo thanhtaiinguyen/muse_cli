@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net8.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><UseWPF>true</UseWPF><EnableWindowsTargeting>true</EnableWindowsTargeting><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup><PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" /><PackageReference Include="xunit" Version="2.5.3" /><PackageReference Include="xunit.runner.visualstudio" Version="2.5.3" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../../src/Muse2Api.Computer/Muse2Api.Computer.csproj" /><ProjectReference Include="../Muse2Api.Computer.Fixture/Muse2Api.Computer.Fixture.csproj" /></ItemGroup>
+  <ItemGroup><Using Include="Xunit" /></ItemGroup>
+</Project>

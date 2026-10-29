@@ -5,3 +5,7 @@ data/
 *.user
 *.suo
 ui_config.json
+artifacts/
+dist/
+**/browser-sessions/
+**/local-conversations/

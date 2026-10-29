@@ -1,4 +1,4 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
@@ -14,6 +14,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Muse2Api.WinForms", "src\Muse2Api.WinForms\Muse2Api.WinForms.csproj", "{90ADDAE6-A8D9-43A7-8DEA-C49FE3A7833F}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Muse2Api.Agent", "src\Muse2Api.Agent\Muse2Api.Agent.csproj", "{02933914-5984-4E1B-AF93-0532E2F7BBEB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Muse2Api.Computer", "src\Muse2Api.Computer\Muse2Api.Computer.csproj", "{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -40,11 +42,16 @@ Global
 		{02933914-5984-4E1B-AF93-0532E2F7BBEB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{02933914-5984-4E1B-AF93-0532E2F7BBEB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{02933914-5984-4E1B-AF93-0532E2F7BBEB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{53F98E9D-4630-44EE-B4F1-74EA1E9E35A0} = {EAF7BE32-92C1-42C9-AAAF-88ABE7844499}
 		{035030F7-E517-433D-98A9-4129A1118856} = {82CACBCC-C47C-45FB-90DE-CC5D6C88DA24}
 		{90ADDAE6-A8D9-43A7-8DEA-C49FE3A7833F} = {EAF7BE32-92C1-42C9-AAAF-88ABE7844499}
 		{02933914-5984-4E1B-AF93-0532E2F7BBEB} = {EAF7BE32-92C1-42C9-AAAF-88ABE7844499}
+		{4913E0F9-4DE0-4EE8-BD85-DE5E1BE67300} = {EAF7BE32-92C1-42C9-AAAF-88ABE7844499}
 	EndGlobalSection
 EndGlobal

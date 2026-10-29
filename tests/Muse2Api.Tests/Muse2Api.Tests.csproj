@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Muse2Api\Muse2Api.csproj" />
+    <ProjectReference Include="..\..\src\Muse2Api.Agent\Muse2Api.Agent.csproj" />
   </ItemGroup>
 
 </Project>

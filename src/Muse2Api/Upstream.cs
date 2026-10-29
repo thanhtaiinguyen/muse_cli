@@ -36,9 +36,9 @@ public static class Upstream
 
         async Task<JsonObject?> GetSession()
         {
-            var req = new HttpRequestMessage(HttpMethod.Get, SessionApi);
+            using var req = new HttpRequestMessage(HttpMethod.Get, SessionApi);
             req.Headers.Add("Cookie", CookieHeader(jar));
-            var resp = await client.SendAsync(req, ct);
+            using var resp = await client.SendAsync(req, ct);
             MergeCookies(resp, jar, expires);
             if ((int)resp.StatusCode is 401 or 403)
                 throw UpstreamException.Auth($"session rejected by upstream (HTTP {(int)resp.StatusCode})");
@@ -52,20 +52,24 @@ public static class Upstream
         string? Str(string k) => body[k]?.GetValue<string>() is { } s ? s[..Math.Min(128, s.Length)] : null;
         var meta = new Dictionary<string, string?>
         {
-            ["session_status"] = Str("status"), ["vm_id"] = Str("vm_id"), ["vm_state"] = Str("vm_state"),
+            ["session_status"] = Str("status"),
+            ["vm_id"] = Str("vm_id"),
+            ["vm_state"] = Str("vm_state"),
         };
         if (meta["vm_id"] is not null && meta["vm_state"] != "DISABLED")
         {
             try
             {
-                var wake = new HttpRequestMessage(HttpMethod.Post, VmWakeApi);
+                using var wake = new HttpRequestMessage(HttpMethod.Post, VmWakeApi);
                 wake.Headers.Add("Cookie", CookieHeader(jar));
                 wake.Content = JsonContent.Create(new
                 {
-                    vm_id = meta["vm_id"], retry_count = 0,
+                    vm_id = meta["vm_id"],
+                    retry_count = 0,
                     connect_attempt_id = Guid.NewGuid().ToString(),
                 });
-                var w = await client.SendAsync(wake, ct);
+                using var w = await client.SendAsync(wake, ct);
+                MergeCookies(w, jar, expires);
                 meta["vm_wake_http"] = ((int)w.StatusCode).ToString();
             }
             catch (HttpRequestException ex) { meta["vm_wake_http"] = ex.GetType().Name; }
@@ -86,9 +90,9 @@ public static class Upstream
         {
             try
             {
-                var req = new HttpRequestMessage(HttpMethod.Get, SessionApi);
+                using var req = new HttpRequestMessage(HttpMethod.Get, SessionApi);
                 req.Headers.Add("Cookie", CookieHeader(jar));
-                var resp = await client.SendAsync(req, ct);
+                using var resp = await client.SendAsync(req, ct);
                 MergeCookies(resp, jar, expires);
                 if (resp.IsSuccessStatusCode)
                 {
@@ -101,6 +105,7 @@ public static class Upstream
                     }
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch { /* a failed poll only costs that poll */ }
             if (DateTime.UtcNow.AddSeconds(pollSeconds) > deadline) return state;
             await Task.Delay(TimeSpan.FromSeconds(pollSeconds), ct);

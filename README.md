@@ -1,170 +1,110 @@
-# muse2api — .NET port (ASP.NET Core 8)
+# Muse
 
-Bản port sang .NET của repo Python [www222fff/muse2api](https://github.com/www222fff/muse2api)
-(FastAPI). Mục tiêu: cùng API OpenAI-compatible, cùng cấu hình bằng biến môi
-trường `MUSE2API_*`, để bạn — người chuyên .NET — có thể tiếp tục phát triển
-bằng C# thay vì Python.
+Ứng dụng cá nhân để chat, đọc dự án, sửa tệp và chạy kiểm tra qua tài khoản Muse.
 
-> **Trạng thái thật:** đây là bản port **giai đoạn 2, đã build và chạy thử với
-> driver mock**. Browser driver đã được port sang Playwright (xem dưới),
-> nhưng chưa kiểm chứng live với tài khoản thật — xem chi tiết ở cuối file.
+## Mở ứng dụng
 
-## Chạy
+Mở **`dist\Muse\Muse.exe`** (hiện tại **0.8.4**). Bản này đã kèm runtime; không cần cài SDK hay mở terminal.
+Nếu đang mở bản cũ, đóng cửa sổ cũ trước khi mở bản mới.
 
-```sh
-dotnet run --project src/Muse2Api
-# hoặc, sau khi build:
-# MUSE2API_DRIVER=mock MUSE2API_PORT=18610 dotnet src/Muse2Api/bin/Debug/net8.0/Muse2Api.dll
-```
+Ngay trong ứng dụng:
 
-Mặc định nghe ở `http://127.0.0.1:18610` (driver `mock`, không cần tài khoản).
-Cấu hình giống bản Python: `MUSE2API_DRIVER`, `MUSE2API_PORT`,
-`MUSE2API_API_KEY`, `MUSE2API_ADMIN_KEY`, `MUSE2API_DATA_DIR`, …
+1. Bấm **Chọn dự án** và chọn thư mục trên máy.
+2. Bấm **Kết nối Muse**, đăng nhập trên trang Muse; kết nối được lưu tự động.
+3. Nhập điều bạn muốn làm, hoặc chọn **Tìm hiểu dự án**, **Tìm và sửa lỗi**, **Thêm tính năng**, **Kiểm tra chất lượng**.
 
-```sh
-curl http://127.0.0.1:18610/healthz
-curl -H "Authorization: Bearer $KEY" http://127.0.0.1:18610/v1/models
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  http://127.0.0.1:18610/v1/chat/completions \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
-```
+Muse tự chuẩn bị kết nối và tự quản lý mã truy cập nội bộ. Người dùng không
+cần lấy/nhập API key, admin key, chọn cổng, chạy server hay nạp cookie thủ công.
 
-Trên Windows: mở solution `Muse2Api.sln` bằng Visual Studio / Rider, hoặc
-`dotnet run` trong PowerShell — nhưng với bản .NET này bạn cũng có thể dùng
-lại UI Tkinter ở repo Python, hoặc tự viết WinForms/WPF gọi API trên.
+## Không gian làm việc
 
-## Đã port
+- Hội thoại là màn hình chính; Enter để gửi, Shift+Enter để xuống dòng.
+- Không tự dừng sau 30 bước. Muse tiếp tục đến khi hoàn thành, cần bạn trả lời,
+  bạn bấm Dừng, hoặc gặp lỗi/vòng lặp không tiến triển. Chi tiết thao tác ở Terminal;
+  chat chỉ có trạng thái hiện tại và câu trả lời cuối.
+- Khi web đã trả lời xong, app nhận phản hồi hoàn tất. Nếu web mất trạng thái,
+  báo lỗi hoặc đứng sau khi có nội dung mà không đổi trong 90 giây, app dừng
+  chờ và báo rõ; giữ cuộc chat hiện tại, không tự gửi lại hay tạo chat thay thế.
+- Dán ảnh chụp màn hình bằng **Ctrl+V**, **Shift+Insert**, chuột phải → Dán
+  hoặc nút **Dán ảnh**. Có ảnh xem trước và nút bỏ ảnh trước khi gửi; có thể
+  gửi ảnh không kèm chữ. Tối đa 4 ảnh, 8 MiB mỗi ảnh, tổng 16 MiB mỗi lượt.
+- Tin nhắn **BẠN** nằm bên phải, nền tím nhẹ; **MUSE · AI** nằm bên trái.
+  Mỗi tin nhắn có nút Sao chép; hoạt động công cụ xem trong bảng Chi tiết.
+- Phong cách Mesh Gradient: nền xanh đen, tím/cyan/hồng, nút chuyển sắc,
+  khối bo góc và biểu tượng vector. Có chế độ sáng và tối; giữ tiếng Việt.
+  Gradient được lưu đệm, không chạy hiệu ứng chuyển động nền.
+- Lịch sử ở thanh bên, lưu riêng theo từng dự án.
+- **Tệp dự án** mở trình xem/sửa tệp khi cần.
+- **Thay đổi** hiển thị kết quả và cho phép hoàn tác tệp.
+- Trước khi ghi tệp, Muse hiển thị nội dung trước/sau để bạn duyệt.
+- **Dừng** hủy yêu cầu đang chạy; các bước đã hoàn tất vẫn được giữ lại.
+- **Terminal** mở nhật ký và ô chạy lệnh, có lựa chọn PowerShell/CMD/Bash; tuỳ chọn nâng cao nằm trong **Cài đặt**.
+- **Chạy nền** giữ ứng dụng hoặc máy chủ hoạt động trong lúc kiểm thử; **Dừng nền** kết thúc các tiến trình Muse đã mở.
+- **Màn hình** chọn cửa sổ để Muse đọc giao diện, chụp ảnh, nhập dữ liệu, bấm nút và kiểm tra trạng thái. Khi cần, Muse tự mở hộp chọn cửa sổ; Esc dừng điều khiển.
 
-| Phần Python | .NET |
-|---|---|
-| `config.py` (env `MUSE2API_*`) | `Settings.cs`, cùng tên biến và giá trị mặc định |
-| `core/models.py` (registry + alias) | `Models.cs`, port 1:1, kèm test |
-| `core/prompt.py` (flatten multi-turn) | `Models.cs` (`Prompt`), port 1:1, kèm test |
-| `errors.py` | `Errors.cs` (cùng status/type/code OpenAI) |
-| `drivers/mock.py` (chat, ảnh PNG 64×64, video placeholder, quota) | `Drivers.cs` (`MockDriver`), kèm test |
-| `accounts/model.py` + `pool.py` (LRU/round-robin/affinity, cooldown, failover, JSON persistence) | `Store.cs` (`AccountPool`) |
-| `auth/keys.py` (key `m2a-…`, chỉ lưu SHA-256) | `Store.cs` (`KeyStore`) |
-| `services/gateway.py` (failover qua account) | `Gateway.cs` (dùng Channel vì C# cấm `yield` trong `try/catch`) |
-| `services/request_log.py` (SQLite) | `Store.cs` (`RequestLog`, SQLite `data/requests.db`, WAL) |
-| `services/tasks.py` (task ảnh/video, JSON persistence) | `Store.cs` (`TaskManager`) |
-| `core/media.py` (lưu media, SSRF guard cơ bản) | `Store.cs` (`MediaStore`) + `AppState.cs` (`MediaHelp`) |
-| `upstream/muse.py` (session renew, VM wake) | `Upstream.cs` (HttpClient, port đầy đủ) |
-| Endpoints: health, models, chat (stream + non-stream), responses (stream + non-stream), images, images/edits, videos, media, admin (accounts, keys, requests, stats, tasks), metrics | `Endpoints.cs` |
-| Endpoint `/admin/metrics` mới thêm ở bản Python | `Endpoints.cs` (`/admin/metrics`, cùng định dạng Prometheus) |
-| Dashboard | Trang HTML tối giản ở `/dashboard` (trang đầy đủ của Python chưa port) |
+Dữ liệu cá nhân được lưu dưới `%LOCALAPPDATA%\Muse2Api.WinForms`.
+Ứng dụng dùng gateway riêng trên địa chỉ loopback với cổng tự chọn, không thay
+đổi hoặc dừng gateway khác đang mở trên máy. Lệnh shell được duyệt sẽ chạy với
+quyền người dùng; chúng không bị sandbox theo thư mục.
 
-## Windows UI (WinForms)
-
-Project `src/Muse2Api.WinForms/` là cửa sổ điều khiển cho gateway .NET
-(hoặc gateway Python, vì UI chỉ gọi HTTP): Server (khởi động/dừng, log),
-Chat thử, Quản lý (status/accounts/metrics, thêm tài khoản, mở dashboard).
-Chạy trên Windows: `dotnet run --project src/Muse2Api.WinForms`.
-Trên Linux/macOS, project chỉ build được để kiểm tra lỗi biên dịch
-(`EnableWindowsTargeting`), không chạy được giao diện vì thiếu runtime
-WindowsDesktop — đó là giới hạn của WinForms, không phải bug.
-
-**Đăng nhập và nạp tài khoản:** ở tab Quản lý, bấm
-**Đăng nhập muse.ai...** để mở cửa sổ WebView2 (`LoginForm.cs`) đăng nhập
-trực tiếp trên trang muse.ai, rồi nạp cookie phiên vào gateway local qua
-`POST /admin/accounts`. UI không bao giờ hỏi hay đọc mật khẩu; chỉ gửi
-cookie phiên (`hatch_sess` + `hatch_native_auth_device`, tuỳ chọn
-`hatch_gw`/`hatch_vml`) tới gateway local, và gateway chỉ trả về cookie
-đã che. Chi tiết và các lưu ý an toàn xem
-`src/Muse2Api.WinForms/README.md`. Cách test trên Windows xem `TESTING.md`.
-
-## Browser driver (.NET / Playwright) — mới
-
-Driver `browser` đã được port từ Python `drivers/browser/` sang
-[Microsoft.Playwright](https://playwright.dev/dotnet/) trong
-`src/Muse2Api/BrowserDriver.cs` + `src/Muse2Api/Dom.cs` (selectors và script
-JS port 1:1 từ `dom.py`, kể cả parser quota EN/zh-CN/zh-TW):
-một Chromium, một context riêng cho mỗi account, một page/tab tái sử dụng,
-hot-page follow-up, deny approval card, chat stream theo delta, chờ media
-(ảnh/video) với grace period, tải media qua blob URL trong page, quota qua
-Settings → Usage, renew session qua HTTP upstream.
-
-Cài Chromium một lần trên Windows:
+## Dành cho người phát triển
 
 ```powershell
-dotnet tool install --global Microsoft.Playwright.CLI
-playwright install chromium
-# hoặc set MUSE2API_CHROMIUM_PATH tới Chrome/Chromium đã có sẵn
+dotnet build Muse2Api.sln -c Release
+dotnet test Muse2Api.sln -c Release
+# Chạy UI từ source:
+dotnet run --project src/Muse2Api.WinForms -c Release
+# Đóng gói bản Windows không cần SDK/runtime bên ngoài:
+dotnet publish src/Muse2Api.WinForms -c Release -r win-x64 --self-contained true -o dist/Muse
 ```
 
-## Chưa port / khác biệt — đọc trước khi dùng thật
+Backend OpenAI-compatible vẫn chạy độc lập bằng `dotnet run --project src/Muse2Api`.
+Chế độ backend riêng giữ cơ chế API/admin key và cấu hình `MUSE2API_*` trong
+`Settings.cs`. UI cá nhân tự xử lý toàn bộ phần này ở bên trong.
 
-- **Browser driver chưa kiểm chứng live.** Code đã build và đường lỗi
-  "chưa cài Chromium" đã kiểm tra, nhưng trên VM này không tải được browser
-  của Playwright (CDN bị chặn) và không có sẵn Chromium, nên chưa chạy thử
-  với muse.ai thật. Chạy với tài khoản thật lần đầu và kỳ vọng các DOM
-  mismatch đầu tiên sẽ nằm ở `Dom.cs`, đúng như bản Python.
-- **HTTP driver: chat vẫn 501 như bản Python**, chỉ có session renewal đã port.
-- **Request log: đã port sang SQLite** (`data/requests.db`, cùng schema
-  và index với Python, WAL, prune theo `MUSE2API_REQUEST_LOG_RETENTION_DAYS`
-  mặc định 14 ngày khi khởi động). `/admin/requests`, `/admin/stats` và
-  `/admin/metrics` giờ sống qua restart — đã kiểm chứng: 2 request trước
-  restart vẫn còn đủ 2 sau restart.
-- **Matting (tách nền transparent bằng BiRefNet): chưa port.** Ảnh
-  `background: "transparent"` hiện trả ảnh mock bình thường.
-- **Keepalive loop + housekeeping: đã port** (`BackgroundServices.cs`).
-  Khi `MUSE2API_KEEPALIVE_ENABLED=1` và driver hỗ trợ renew, loop định kỳ
-  renew từng account đang bật (merge cookie như `/renew`, account lỗi auth
-  → invalid). Housekeeping mỗi 60s flush key, mỗi giờ prune request log
-  và media cũ. Đã kiểm chứng với mock, interval 5s: log hiện
-  `keepalive acc_... -> True` lặp lại.
-- **Streaming heartbeat: đã port.** Khi `MUSE2API_STREAM_HEARTBEAT_INTERVAL > 0`,
-  stream gửi `: keepalive` trong lúc chờ token đầu tiên (như Python C4);
-  lỗi upstream lúc này trả về dạng SSE error thay vì HTTP code vì header
-  đã commit. Đã kiểm chứng với interval 1s: comment `: keepalive` xuất
-  hiện trước chunk đầu, stream vẫn kết thúc bằng `[DONE]`.
-- **SSRF guard: đã port đầy đủ như Python.** `LoadImageRef` resolve DNS
-  trước khi fetch, chặn IP private/loopback/link-local/multicast/reserved/
-  unspecified, và kiểm tra lại từng redirect (tối đa 5 hop, cap 20 MiB).
-  Đã kiểm chứng: localhost, 127.0.0.1, 10.x, 192.168.x, 172.16.x,
-  169.254.x đều bị chặn 400.
-- **Dashboard đầy đủ, extension zip:** chưa port (extension trả 404).
-  Dashboard hiện tại là trang HTML tối giản, không phải dashboard đầy đủ
-  của Python.
+Xem [WORKSPACE.md](WORKSPACE.md) cho hành vi của desktop và [TESTING.md](TESTING.md)
+cho hướng dẫn kiểm chứng. Bản port gốc từ [www222fff/muse2api](https://github.com/www222fff/muse2api).
 
-## Kiểm thử
+Bản 0.7 dùng một định dạng kế hoạch JSON riêng cho Muse web: model sinh dữ liệu
+`actions`, ứng dụng chuyển sang công cụ cục bộ có kiểm tra và duyệt. Model không
+cần giả lập công cụ của trang web hay tự nhận đã chạy trên Windows.
 
-```sh
-dotnet test Muse2Api.sln
-```
+Agent phải đọc phiên bản hiện tại trước khi sửa, đọc đủ các trang trước khi
+ghi đè toàn bộ tệp, giữ BOM/encoding/xuống dòng, kiểm tra lại sau khi lưu và
+không tính một lần ghi không đổi là sửa thật. Terminal có tiến trình nền,
+stdin, mã thoát, đầu ra cuối khi log dài và chờ tiến trình con thoát khi dừng.
 
-Test xUnit hiện tại bao phủ logic thuần: model registry, prompt flatten,
-mock driver (chat + PNG + quota), account pool + masking cookie, key store,
-media store.
+Đăng nhập nằm trong dữ liệu người dùng, dùng lại qua các bản build. Cookie và
+local storage của trình duyệt chat được lưu; tài khoản đang chờ lượt không bị
+coi là đăng xuất. Mở lại cửa sổ đăng nhập không tự xóa cookie; chỉ **Tài khoản
+khác** mới xóa phiên WebView. Cookie phải được Muse xác nhận trước khi lưu.
 
-> Lưu ý môi trường: trên VM Linux này, `vstest` bị treo ở bước kết nối
-> testhost ngay cả với project xUnit tối giản mới tạo, nên `dotnet test`
-> chưa chạy xong ở đây. Logic trong `PortTests.cs` đã được kiểm chứng bằng
-> một console runner tạm (cùng các assert) và **tất cả đều pass**, kèm
-> phát hiện và sửa 1 bug thật trong `KeyStore.Create` (base64 bị cắt ký tự
-> `+`/`/` làm `[..24]` throw). Trên máy Windows của bạn, `dotnet test`
-> chạy bình thường thì chạy lệnh trên.
+**203 test gateway/agent/phiên đăng nhập** đã qua, gồm kiểm tra DOM bằng Chrome
+headless. Bản 0.7.2 giữ escape của code qua khối JSON, gửi lại phản hồi sai
+định dạng và không chạy một phần kế hoạch lỗi. Gói mới:
+`dist/Muse/Muse.exe` (chi tiết trong TESTING.md).
+Bản 0.8.2 hoàn thiện dán PNG/bitmap/file ảnh, preview/bỏ ảnh và truyền ảnh
+qua HTTP tới agent. Ảnh không bị upload lại ở mỗi bước công cụ; dán lại cùng
+ảnh ở lượt mới vẫn gửi được. JSON lịch sử chỉ giữ ghi chú về ảnh đã gửi,
+không lưu base64 ảnh đầy đủ.
 
-Test integration qua HTTP đã kiểm chứng bằng tay với server mock:
-health, ready, models, chat thường + stream, responses, images (sync/async),
-images/edits, videos (async task), admin accounts/keys/stats/metrics, 401 khi
-thiếu key, và persistence account qua restart.
-
-## Cấu trúc
-
-```
-src/Muse2Api/
-  Program.cs      # host, middleware log request + error body OpenAI-style
-  Settings.cs     # env MUSE2API_*
-  Errors.cs       # MuseException / UpstreamException
-  Models.cs       # ModelRegistry + Prompt
-  Drivers.cs      # IMuseDriver, MockDriver, HttpDriver
-  BrowserDriver.cs # Playwright browser driver
-  Dom.cs          # selectors + JS + quota parsing (port từ dom.py)
-  Upstream.cs     # muse.ai session / VM wake
-  Store.cs        # AccountPool, KeyStore, RequestLog, TaskManager, MediaStore
-  Gateway.cs      # failover
-  AppState.cs     # container + JSON helpers + LoadImageRef
-  Endpoints.cs    # toàn bộ route
-tests/Muse2Api.Tests/
-  PortTests.cs    # xUnit
-```
+Khi phát triển bản tiếp theo, chạy `scripts/Publish-Desktop.ps1`. Quy trình
+kiểm thử, publish vào thư mục tạm và kiểm tra gói rồi mới thay `dist/Muse`,
+dọn các bản cũ. Nếu app đang chạy hoặc bản mới lỗi thì giữ các bản cũ.
+Không dọn hồ sơ đăng nhập/lịch sử trong LocalAppData.
+Bản 0.8.1 sửa chữ vẽ tràn/chồng giữa các nút, co giãn Form theo DPI và Cài
+đặt dùng nội dung tự co giãn/cuộn, giữ nút Xong trong khung. Mỗi cuộc chat
+trong ứng dụng dùng một thread Muse xuyên suốt các bước và qua restart;
+chỉ gửi quan sát mới, không gửi lại toàn bộ lịch sử. Gặp rate limit thì dừng,
+không tự tạo chat thay thế hoặc gửi lại qua tài khoản khác.
+Bản 0.7.3 làm gọn chat: một dòng trạng thái đang suy nghĩ/đọc/sửa/chạy kiểm
+tra, rồi một câu trả lời cuối. Nút **Chi tiết** mở toàn bộ hoạt động trong
+Terminal. Mở lại lịch sử cũng không dựng lại các thẻ hoạt động riêng lẻ.
+Các thao tác Windows đã được kiểm tra riêng trên ứng dụng mẫu; bộ native có
+2 bài chính sách chạy nền và 3 bài mở cửa sổ opt-in. Hiện chỉ tiếp tục kiểm thử
+nền theo yêu cầu người dùng. Kiểm tra thật qua Muse: sửa lỗi phép cộng C#,
+`dotnet run` in `ADD_TEST_OK`, khởi động lại và chat bằng phiên cũ, không đăng
+nhập/lấy mã mới. Bản 0.7.2 cũng đã sửa code chứa tiếng Việt, dấu nháy và đường
+dẫn Windows qua Muse thật, chạy `dotnet run` ra `QUOTE_TEST_OK`, exit 0.
+Chuỗi UI qua Muse chưa được xác minh đầy đủ sau khi dừng mở
+cửa sổ; xem [TESTING.md](TESTING.md) cho phạm vi đã kiểm chứng.

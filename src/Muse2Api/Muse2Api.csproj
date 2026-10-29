@@ -10,4 +10,8 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
     <PackageReference Include="Microsoft.Playwright" Version="1.50.0" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Remove="data\**;**\browser-sessions\**;**\accounts.json;**\keys.json;**\tasks.json;**\requests.db;**\api_key" />
+    <None Update="data\**" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
 </Project>
