@@ -1,11 +1,48 @@
+# Build products and IDE state
 bin/
 obj/
-data/
+dist/
+artifacts/
+TestResults/
 .vs/
 *.user
 *.suo
+
+# Runtime and browser data (may contain login credentials)
+data/
 ui_config.json
-artifacts/
-dist/
 **/browser-sessions/
 **/local-conversations/
+**/browser-profile/
+**/WebView2/
+**/AgentSessions/
+**/accounts.json
+**/keys.json
+**/tasks.json
+**/api_key
+**/requests.db*
+**/cookies.json
+**/storage-state.json
+**/auth.json
+
+# Local environment variables; keep safe sample configurations
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Private keys/certificates (do not commit real credentials)
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases and their journal files
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Operating-system files
+.DS_Store
+Thumbs.db
