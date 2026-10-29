@@ -33,6 +33,8 @@ public class SessionPersistenceTests
         const string state = "{\"cookies\":[],\"origins\":[]}";
         await store.SaveAsync(account, state);
         Assert.Equal(state, new BrowserSessionStore(dir.Root).Load(account));
+        if (OperatingSystem.IsWindows())
+            Assert.DoesNotContain("AuthenticationHash", File.ReadAllText(Directory.GetFiles(Path.Combine(dir.Root, "browser-sessions"))[0]));
         Assert.Null(store.Load(new Account { Cookies = new(account.Cookies) }));
         account.Cookies["hatch_sess"] = "another-login"; Assert.Null(store.Load(account));
         Assert.Empty(Directory.GetFiles(Path.Combine(dir.Root, "browser-sessions"), "*.tmp"));
