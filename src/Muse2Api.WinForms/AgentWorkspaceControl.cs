@@ -12,10 +12,10 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private readonly Func<Task> _login;
     private readonly Func<Task<bool>> _ensureReady;
     private readonly Action _settings;
-    private readonly ChatSessionStore _store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "AgentSessions"));
+    private readonly ChatSessionStore _store = new(Path.Combine(DesktopDataPaths.Root, "AgentSessions"));
     private readonly ConcurrentQueue<AgentEvent> _events = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 100 };
-    private readonly string _preferences = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "agent_workspace.json");
+    private readonly string _preferences = Path.Combine(DesktopDataPaths.Root, "agent_workspace.json");
     private ToolExecutor? _tools;
     private ChatSession? _session;
     private CancellationTokenSource? _cancel;
