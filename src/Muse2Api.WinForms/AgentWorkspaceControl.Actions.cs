@@ -99,6 +99,7 @@ public sealed partial class AgentWorkspaceControl
                         break;
                     case "tool_start":
                         pendingAnswer = null;
+                        _chat.AddToolCall(item.Tool ?? "tool", item.Path, item.Text).SetResult("", isError: false);
                         break;
                     case "tool_result":
                     case "terminal_result":
@@ -108,7 +109,7 @@ public sealed partial class AgentWorkspaceControl
                         break;
                     case "completed":
                     case "waiting_input":
-                        if (!string.IsNullOrWhiteSpace(pendingAnswer)) _chat.AddAssistantMessage(pendingAnswer);
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer)) _chat.AddAssistantMessage(pendingAnswer, stream: false);
                         pendingAnswer = null;
                         break;
                     case "error":
@@ -309,8 +310,8 @@ public sealed partial class AgentWorkspaceControl
         var connection = _connection();
         var pastedImages = _imageDraft.Select(image => image.DataUrl).ToList();
         if (prompt.Length == 0) prompt = "Hãy xem ảnh đính kèm.";
-        var turbo = _permissions.SelectedIndex == 2;
-        var agentPrompt = turbo ? "Chế độ Turbo đang bật: trả lời và tóm tắt hoàn toàn bằng tiếng Việt; tự thực hiện mọi bước cần thiết, không chờ duyệt.\n" + prompt : prompt;
+        // Turbo changes the local approval policy, never the user's task or
+        // the evidence required to complete it. Vietnamese is in SystemPrompt.
         var model = string.IsNullOrWhiteSpace(_models.Text) ? "muse-chat" : _models.Text.Trim();
         _session!.Model = model;
         if (_session.History.Count == 0) _session.Title = prompt[..Math.Min(60, prompt.Length)].Replace('\n', ' ');
@@ -325,7 +326,7 @@ public sealed partial class AgentWorkspaceControl
         var loop = new AgentLoop(_tools!, (messages, token) => client.ChatAsync(messages, token, _ => { }),
             ConfirmTool, Publish);
         loop.History.AddRange(_session.History.Select(m => (JsonObject)m.DeepClone()));
-        try { await Task.Run(() => loop.RunAsync(agentPrompt, cancel, pastedImages), cancel); }
+        try { await Task.Run(() => loop.RunAsync(prompt, cancel, pastedImages), cancel); }
         finally { _session.History = loop.History.Select(m => (JsonObject)m.DeepClone()).ToList(); }
     }
 
@@ -415,6 +416,7 @@ public sealed partial class AgentWorkspaceControl
                 case "assistant_start":
                     _pendingAssistantText = null;
                     _state.Text = "Đang suy nghĩ…";
+                    if (_activeThinking == null) _activeThinking = _chat.AddThinking("Đang suy nghĩ…");
                     break;
                 case "assistant_delta":
                     continue;
@@ -423,12 +425,15 @@ public sealed partial class AgentWorkspaceControl
                     break;
                 case "tool_start":
                     _pendingAssistantText = null;
-                    _state.Text = DesktopCopy.Activity(item.Tool, item.Path, item.Text);
+                    var activityDesc = DesktopCopy.Activity(item.Tool, item.Path, item.Text);
+                    _state.Text = activityDesc;
                     AppendConsole("\n› " + item.Text + "\n");
+                    _activeThinking?.AddThought(activityDesc);
+                    _activeToolCall = _chat.AddToolCall(item.Tool ?? "tool", item.Path, item.Text);
+                    _activeToolCall.ViewDetailsClicked += () => ToggleDrawer(2, forceOpen: true);
                     break;
                 case "command_output":
                     AppendConsole(item.Text);
-                    _activeToolCall?.AppendOutput(item.Text);
                     continue;
                 case "terminal_result":
                 case "tool_result":
@@ -439,7 +444,7 @@ public sealed partial class AgentWorkspaceControl
                         _activeToolCall = null;
                     }
                     if (_activeThinking != null)
-                        _activeThinking.AddThought("› Đã hoàn thành công cụ.");
+                        _activeThinking.AddThought("Hoàn tất.");
                     break;
                 case "protocol_error":
                     AppendConsole(item.Text + "\n");
@@ -453,6 +458,8 @@ public sealed partial class AgentWorkspaceControl
                     _pendingAssistantText = null;
                     AppendConsole(item.Text + "\n");
                     _activeThinking?.Complete("Đã dừng do gặp lỗi");
+                    _activeThinking = null;
+                    _activeToolCall = null;
                     _activeAssistantCard?.FinalizeStream();
                     _activeAssistantCard = null;
                     _chat.AddNotice(DesktopCopy.FriendlyError(item.Text));
@@ -464,24 +471,25 @@ public sealed partial class AgentWorkspaceControl
                     _pendingAssistantText = null;
                     AppendConsole(item.Text + "\n");
                     _activeThinking?.Complete(item.Text);
+                    _activeThinking = null;
+                    _activeToolCall = null;
                     _activeAssistantCard?.FinalizeStream();
                     _activeAssistantCard = null;
                     _chat.AddNotice(item.Text);
                     _state.Text = item.Text;
                     break;
                 case "completed":
-                    ShowPendingAnswer();
                     _activeThinking?.Complete();
-                    _activeAssistantCard?.FinalizeStream();
-                    _activeAssistantCard = null;
+                    _activeThinking = null;
                     _activeToolCall = null;
+                    ShowPendingAnswer();
                     _state.Text = _tools?.Changes.Count > 0 ? "Đã hoàn tất. Bấm Thay đổi để xem kết quả hoặc hoàn tác." : "Đã hoàn tất. Bạn có thể hỏi tiếp.";
                     break;
                 case "waiting_input":
-                    ShowPendingAnswer();
                     _activeThinking?.Complete("Chờ phản hồi từ bạn");
-                    _activeAssistantCard?.FinalizeStream();
-                    _activeAssistantCard = null;
+                    _activeThinking = null;
+                    _activeToolCall = null;
+                    ShowPendingAnswer();
                     _state.Text = "Muse cần thêm thông tin. Bạn có thể trả lời ngay trong ô chat.";
                     break;
                 default:
@@ -495,7 +503,7 @@ public sealed partial class AgentWorkspaceControl
 
     private void ShowPendingAnswer()
     {
-        if (!string.IsNullOrWhiteSpace(_pendingAssistantText)) _chat.AddAssistantMessage(_pendingAssistantText);
+        if (!string.IsNullOrWhiteSpace(_pendingAssistantText)) _activeAssistantCard = _chat.AddAssistantMessage(_pendingAssistantText, stream: true);
         _pendingAssistantText = null;
     }
 

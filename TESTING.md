@@ -7,7 +7,7 @@ dotnet build Muse2Api.sln -c Release
 dotnet test Muse2Api.sln -c Release
 ```
 
-Hiện tại 203 test: model/prompt, mock driver, auth, SSE/Responses, failover/pool,
+Hiện tại 219 test: model/prompt, mock driver, auth, SSE/Responses, failover/pool,
 media, SQLite, task, agent tools, duyệt/từ chối, hủy tiến trình, encoding/undo,
 lịch sử và host desktop.
 
@@ -233,6 +233,19 @@ Kiểm tra WinForms ngoài màn hình xác nhận 150 thao tác chỉ tạo tin 
 dùng và kết quả cuối, lịch sử giữ cùng cách hiển thị, lỗi ở giai đoạn cập
 nhật giao diện vẫn nhả trạng thái bận; kiểm tra Turbo/chỉ xem, dán ảnh và
 bố cục sáng/tối tại DPI hệ thống 120. Không mở cửa sổ kiểm thử.
+
+Đợt 0.8.5 bổ sung tình huống Turbo với yêu cầu “kiểm tra độ hoàn thiện của
+project”: chỉ yêu cầu đọc để đánh giá, không ép sửa mã. Native offscreen UI
+được kiểm tra qua HTTP loopback để xác nhận mục tiêu và ID cuộc chat không
+bị thay đổi khi bật Turbo; Turbo tự duyệt và chế độ chỉ xem vẫn chặn thao tác.
+Fixture Chrome mô phỏng nhánh chat dựng lại với số khối AI và nội dung JSON
+giống lượt trước, phản hồi tới chậm sau khi nút Stop biến mất, và dựng lại
+khối AI cũ mà không có tin người dùng mới (không được xem là kế hoạch mới).
+Lỗi đọc lại DOM không cooldown tài khoản hoặc gửi lại tự động; HTTP 429 thật
+vẫn cooldown. Cấu trúc nhóm tin nhắn đã được đối chiếu bằng cách chỉ đọc
+cuộc chat lỗi đã có, chặn POST; không gửi chat thật trong đợt kiểm tra này.
+
+Sửa cuộn hội thoại sau 0.8.5: ChatTranscript nay bám đáy theo trạng thái stick-to-bottom. Trước đây chỉ cuộn khi thêm thẻ mới nên khi thẻ Thinking thu gọn, thẻ công cụ đổi trạng thái hoặc chữ streaming làm tăng chiều cao thì khung chat đứng yên và nội dung mới tuột khỏi tầm nhìn. Nay mỗi lần chiều cao nội dung thay đổi, nếu người dùng đang ở gần đáy thì khung tự cuộn xuống cuối, kèm một lần cuộn hoãn sau khi layout xong; nếu người dùng đã kéo lên đọc lại thì không bị giật xuống nữa. Kiểm tra render-check ngoài màn hình bổ sung tình huống 30 thẻ công cụ và tin nhắn dài 60 dòng, kết quả SCROLL_CHECK_OK và RENDER_CHECK_OK; build toàn bộ giải pháp 0 cảnh báo, 0 lỗi.
 
 Khi báo lỗi, gửi bước xảy ra và thông báo trong giao diện. Không gửi mật khẩu,
 giá trị cookie, key hay file hồ sơ cá nhân.

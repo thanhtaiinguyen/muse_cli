@@ -9,20 +9,20 @@ internal static class DesktopTheme
     public sealed record ThemePalette(Color Background, Color Sidebar, Color Surface, Color Border, Color Text, Color Muted, Color Accent, Color Success, Color UserBackground, Color UserBorder, Color Notice, Color Folder);
 
     public static readonly ThemePalette DarkPalette = new(
-        Color.FromArgb(11, 11, 22), Color.FromArgb(16, 15, 30),
-        Color.FromArgb(25, 24, 40), Color.FromArgb(49, 47, 66),
-        Color.FromArgb(245, 244, 251), Color.FromArgb(178, 175, 196),
-        Color.FromArgb(183, 173, 255), Color.FromArgb(113, 223, 192),
-        Color.FromArgb(42, 33, 72), Color.FromArgb(87, 66, 128),
-        Color.FromArgb(251, 201, 120), Color.FromArgb(100, 200, 230));
+        Color.FromArgb(20, 20, 20), Color.FromArgb(26, 26, 26),
+        Color.FromArgb(32, 32, 32), Color.FromArgb(46, 46, 46),
+        Color.FromArgb(236, 236, 236), Color.FromArgb(142, 142, 147),
+        Color.FromArgb(59, 130, 246), Color.FromArgb(16, 185, 129),
+        Color.FromArgb(29, 78, 216), Color.FromArgb(37, 99, 235),
+        Color.FromArgb(239, 68, 68), Color.FromArgb(96, 165, 250));
 
     public static readonly ThemePalette LightPalette = new(
-        Color.FromArgb(247, 246, 252), Color.FromArgb(239, 237, 248),
-        Color.White, Color.FromArgb(218, 213, 234),
-        Color.FromArgb(34, 30, 54), Color.FromArgb(98, 90, 118),
-        Color.FromArgb(98, 75, 195), Color.FromArgb(19, 111, 87),
-        Color.FromArgb(237, 230, 255), Color.FromArgb(195, 178, 235),
-        Color.FromArgb(134, 88, 0), Color.FromArgb(39, 107, 149));
+        Color.FromArgb(248, 248, 250), Color.FromArgb(242, 242, 245),
+        Color.White, Color.FromArgb(226, 226, 232),
+        Color.FromArgb(28, 28, 30), Color.FromArgb(110, 110, 115),
+        Color.FromArgb(37, 99, 235), Color.FromArgb(16, 185, 129),
+        Color.FromArgb(235, 242, 255), Color.FromArgb(191, 219, 254),
+        Color.FromArgb(220, 38, 38), Color.FromArgb(59, 130, 246));
 
     public static ThemeMode Mode { get; private set; } = ThemeMode.Dark;
 
@@ -40,9 +40,9 @@ internal static class DesktopTheme
     public static Color UserBorder => Current.UserBorder;
     public static Color Notice => Current.Notice;
     public static Color Folder => Current.Folder;
-    public static Color Primary => Color.FromArgb(100, 79, 216);
-    public static Color PrimaryEnd => Color.FromArgb(174, 49, 124);
-    public static Color SurfaceStrong => Mode == ThemeMode.Dark ? Color.FromArgb(36, 33, 56) : Color.FromArgb(236, 231, 249);
+    public static Color Primary => Color.FromArgb(37, 99, 235);
+    public static Color PrimaryEnd => Color.FromArgb(29, 78, 216);
+    public static Color SurfaceStrong => Mode == ThemeMode.Dark ? Color.FromArgb(44, 44, 44) : Color.FromArgb(230, 230, 235);
 
     public static event EventHandler? ThemeChanged;
 

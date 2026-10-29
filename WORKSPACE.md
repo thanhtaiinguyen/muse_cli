@@ -114,7 +114,7 @@ và BOM, kiểm tra tệp đổi ngoài ứng dụng trước khi ghi và ghi qu
 
 ## Kiểm chứng hiện tại
 
-203 test phủ gateway/streaming, vòng lặp đọc–duyệt–sửa, lệnh/cancellation,
+219 test phủ gateway/streaming, vòng lặp đọc–duyệt–sửa, lệnh/cancellation,
 hoàn tác, lưu dữ liệu và gateway desktop tự tạo key/cổng riêng/khôi phục tài khoản.
 Kiểm tra giao diện bằng điều khiển cửa sổ đã bị dừng bằng Esc; lỗi lớp hiển thị
 welcome phát hiện qua ảnh đã sửa trong source, chưa quan sát lại sau đó.
@@ -179,3 +179,7 @@ Bản 0.8.3 nâng cấp giao diện toàn diện theo phong cách Codex:
   `IButtonControl`; sửa đồng bộ màu nền Light/Dark trên `MeshLayout` và `ThemedLabel`
   qua `GetEffectiveBackColor()`, khử hoàn toàn góc đen và bóng chữ ma. 203/203 test qua,
   đã đóng gói phát hành thành công tại `dist/Muse/Muse.exe`.
+
+Bản 0.8.4 sửa vòng chạy: tác vụ hoàn tất sau hơn 30 lượt, ngăn vòng lặp quan sát không tiến triển, hủy trước khi nhận kế hoạch muộn không ghi tệp, chờ tiến trình 45 giây không bị cắt xuống 5 giây và vẫn hủy được.
+
+Bản 0.8.5 bổ sung bộ kiểm thử Turbo: yêu cầu đánh giá dự án chỉ yêu cầu đọc, không ép sửa; lỗi đọc lại DOM không cooldown tài khoản và không gửi lại tự động, còn HTTP 429 thật vẫn cooldown. Tổng bộ test chính hiện là 219, đã qua toàn bộ với Chrome headless.

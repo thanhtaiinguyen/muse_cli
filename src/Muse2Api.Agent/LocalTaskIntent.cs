@@ -16,9 +16,12 @@ public static class LocalTaskIntent
         var text = Fold(prompt);
         if (Regex.IsMatch(text, @"^(?:hay |vui long )?(?:huong dan|lam the nao|giai thich cach|how to|show me how)\b")) return LocalWork.None;
         var result = LocalWork.None;
+        // “độ hoàn thiện” is a property to assess, not an instruction to edit.
+        if (Regex.IsMatch(text, @"\b(?:kiem tra|danh gia|xem) (?:muc )?do hoan thien\b")) result |= LocalWork.Read;
+        var editText = Regex.Replace(text, @"\b(?:muc )?do hoan thien\b", "muc do day du");
         if (Regex.IsMatch(text, @"\b(doc|xem (?:file|tep|du an|ma|git)|tim (?:file|tep|loi|kiem)|kiem tra (?:du an|ma|thay doi)|tim hieu du an|giai thich du an|read|inspect|search files|review project)\b")) result |= LocalWork.Read;
         if (Regex.IsMatch(text, @"\b(liet ke|cau truc|list files|list directory)\b")) result |= LocalWork.Browse;
-        if (Regex.IsMatch(text, @"\b(sua|chinh sua|cap nhat (?:file|tep|ma|ui)|tao (?:file|tep)|them (?:tinh nang|chuc nang|nut|che do|dark|light)|doi (?:theme|mau|giao dien)|toi uu|cai thien|hoan thien|thiet ke lai|nang cap|phat trien|edit|modify|replace|fix|implement|optimize|create (?:a )?file|add (?:a )?(?:button|feature|dark|light|theme))\b")) result |= LocalWork.Edit;
+        if (Regex.IsMatch(editText, @"\b(sua|chinh sua|cap nhat (?:file|tep|ma|ui)|tao (?:file|tep)|them (?:tinh nang|chuc nang|nut|che do|dark|light)|doi (?:theme|mau|giao dien)|toi uu|cai thien|hoan thien|thiet ke lai|nang cap|phat trien|edit|modify|replace|fix|implement|optimize|create (?:a )?file|add (?:a )?(?:button|feature|dark|light|theme))\b")) result |= LocalWork.Edit;
         if (Regex.IsMatch(text, @"\b(?:toi|minh) muon (?:phan cai dat|giao dien|theme|dark|light)\b")) result |= LocalWork.Edit;
         if (Regex.IsMatch(text, @"\b(chay|thuc thi|run|execute)\b")) result |= LocalWork.Command;
         if (Regex.IsMatch(text, @"^(?:hay |ban )?(?:thuc hien|lam)(?: luon| di| ngay| giup| cho minh| cho toi)+[.! ]*$")) result |= LocalWork.Edit;

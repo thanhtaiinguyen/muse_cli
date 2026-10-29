@@ -354,12 +354,12 @@ public sealed class BrowserDriver : IMuseDriver
     private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default)
     {
         if (tab.RateLimited) throw UpstreamException.Quota("Muse returned rate limit (HTTP 429). Conversation retained; no automatic retry or replacement chat.");
-        if (tab.Page.IsClosed) throw UpstreamException.Timeout("Muse web page closed; stopped waiting. Conversation retained.");
+        if (tab.Page.IsClosed) throw UpstreamException.ResponseUnavailable("Muse web page closed; stopped waiting. Conversation retained.");
         var state = await Eval(tab.Page, Dom.ChatState, cancel)
-            ?? throw UpstreamException.Timeout("Muse web state unavailable; stopped waiting. Conversation retained.");
+            ?? throw UpstreamException.ResponseUnavailable("Muse web state unavailable; stopped waiting. Conversation retained.");
         if (BoolNode(state, "rateLimited")) throw UpstreamException.Quota("Muse shows a rate limit notice. Conversation retained; no automatic retry or replacement chat.");
         if (!string.IsNullOrWhiteSpace(Str(state, "error")))
-            throw UpstreamException.Timeout("Muse web stopped responding: " + Str(state, "error"));
+            throw UpstreamException.ResponseUnavailable("Muse web stopped responding: " + Str(state, "error"));
         var tail = Str(state, "tail") ?? "";
         var low = tail.ToLowerInvariant();
         foreach (var hint in Dom.QuotaHints)
@@ -580,6 +580,9 @@ public sealed class BrowserDriver : IMuseDriver
         var (tab, baseState) = await BeginChat(account, req);
         var baseCount = IntNode(baseState, "agentCount");
         var baseText = Str(baseState, "lastText") ?? "";
+        var baseUserKey = Str(baseState, "userKey") ?? "";
+        var baseReplyKeys = (baseState?["replyKeys"] as System.Text.Json.Nodes.JsonArray)?
+            .Select(n => n?.GetValue<string>() ?? "").ToHashSet() ?? new HashSet<string>();
         var started = DateTime.UtcNow;
         var emitted = "";
         string? last = null;
@@ -598,7 +601,8 @@ public sealed class BrowserDriver : IMuseDriver
                 req.Cancel.ThrowIfCancellationRequested();
                 var elapsed = (DateTime.UtcNow - started).TotalSeconds;
                 if (elapsed > _settings.ChatTimeout) throw UpstreamException.Timeout("assistant reply timed out");
-                if (!gotFirst && elapsed > _settings.FirstTokenTimeout) throw UpstreamException.Timeout("no first token from assistant");
+                if (!gotFirst && elapsed > _settings.FirstTokenTimeout)
+                    throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.");
                 await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
                 var st = await ChatState(tab, req.Cancel);
                 if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
@@ -606,7 +610,7 @@ public sealed class BrowserDriver : IMuseDriver
                 var snapshot = IntNode(st, "agentCount") + ":" + BoolNode(st, "generating") + ":" + (Str(st, "lastText") ?? "");
                 if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
                 if (gotFirst && elapsed - progressAt > _settings.ChatIdleTimeout)
-                    throw UpstreamException.Timeout("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
+                    throw UpstreamException.ResponseUnavailable("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
                 if (req.LocalTools && elapsed >= diagnosticAt)
                 {
                     Diagnostic?.Invoke($"local_reply_poll seconds={(int)elapsed} bubbles={IntNode(st, "agentCount")} baseline={baseCount} chars={(Str(st, "lastText") ?? "").Length} generating={BoolNode(st, "generating")}");
@@ -614,11 +618,15 @@ public sealed class BrowserDriver : IMuseDriver
                 }
                 if (BoolNode(st, "approval")) { await DenyApprovals(tab); continue; }
                 var text = Str(st, "lastText") ?? "";
-                var isNew = IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
+                var currentUserKey = Str(st, "userKey") ?? "";
+                var replyKey = Str(st, "replyKey") ?? "";
+                var newMessage = BoolNode(st, "replyAfterUser") && currentUserKey.Length > 0 && currentUserKey != baseUserKey
+                    && replyKey.Length > 0 && !baseReplyKeys.Contains(replyKey);
+                var isNew = newMessage || IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
                 if (!isNew || text.Length == 0)
                 {
-                    if (stoppedAt is { } idleAt && elapsed - idleAt > 2)
-                        throw UpstreamException.Timeout("Muse web stopped responding without a completed reply. Conversation retained; no automatic resend.");
+                    if (stoppedAt is { } idleAt && elapsed - idleAt > _settings.ReplyRenderGrace)
+                        throw UpstreamException.ResponseUnavailable("Muse web stopped responding without a completed reply that the app could identify. Conversation retained; no automatic resend.");
                     if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
                         throw UpstreamException.Timeout("upstream workspace is stuck connecting");
                     continue;

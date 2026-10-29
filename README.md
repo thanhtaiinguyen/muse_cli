@@ -4,7 +4,7 @@
 
 ## Mở ứng dụng
 
-Mở **`dist\Muse\Muse.exe`** (hiện tại **0.8.4**). Bản này đã kèm runtime; không cần cài SDK hay mở terminal.
+Mở **`dist\Muse\Muse.exe`** sau khi publish thành công. Phiên bản mã nguồn hiện tại là **0.8.5**; bản đã đóng gói kèm runtime nên không cần cài SDK hay mở terminal.
 Nếu đang mở bản cũ, đóng cửa sổ cũ trước khi mở bản mới.
 
 Ngay trong ứng dụng:
@@ -79,7 +79,7 @@ local storage của trình duyệt chat được lưu; tài khoản đang chờ 
 coi là đăng xuất. Mở lại cửa sổ đăng nhập không tự xóa cookie; chỉ **Tài khoản
 khác** mới xóa phiên WebView. Cookie phải được Muse xác nhận trước khi lưu.
 
-**203 test gateway/agent/phiên đăng nhập** đã qua, gồm kiểm tra DOM bằng Chrome
+**219 test gateway/agent/phiên đăng nhập** đã qua, gồm kiểm tra DOM bằng Chrome
 headless. Bản 0.7.2 giữ escape của code qua khối JSON, gửi lại phản hồi sai
 định dạng và không chạy một phần kế hoạch lỗi. Gói mới:
 `dist/Muse/Muse.exe` (chi tiết trong TESTING.md).

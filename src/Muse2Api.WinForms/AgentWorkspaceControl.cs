@@ -136,11 +136,11 @@ public sealed partial class AgentWorkspaceControl : UserControl
         shell.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 224)); shell.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         shell.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         shell.Controls.Add(BuildSidebar(), 0, 0);
-        var body = new MeshLayout(MeshTone.Canvas, new(SizeType.Absolute, 82), new(SizeType.Absolute, 76), new(SizeType.Percent, 100));
-        body.Controls.Add(BuildHeader(), 0, 0); body.Controls.Add(BuildConnectionCard(), 0, 1);
+        var body = new MeshLayout(MeshTone.Canvas, new(SizeType.Absolute, 52), new(SizeType.Percent, 100));
+        body.Controls.Add(BuildHeader(), 0, 0);
         _drawer = new SplitContainer { Dock = DockStyle.Fill, Size = new Size(1000, 620), SplitterDistance = 630, Panel1MinSize = 300, Panel2MinSize = 260, Panel2Collapsed = true, BackColor = DesktopTheme.Border, Margin = new Padding(0) };
         _drawer.Panel1.Controls.Add(BuildConversation()); _drawer.Panel2.Controls.Add(BuildDetails());
-        body.Controls.Add(_drawer, 0, 2); shell.Controls.Add(body, 1, 0); Controls.Add(shell);
+        body.Controls.Add(_drawer, 0, 1); shell.Controls.Add(body, 1, 0); Controls.Add(shell);
     }
 
     private Control BuildSidebar()
@@ -168,55 +168,32 @@ public sealed partial class AgentWorkspaceControl : UserControl
 
     private Control BuildHeader()
     {
-        var row = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(24, 12, 24, 4), BackColor = DesktopTheme.Background };
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 452));
-        row.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); row.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
-        var title = DesktopTheme.Column(new(SizeType.Absolute, 28), new(SizeType.Absolute, 22)); title.BackColor = DesktopTheme.Background;
+        var row = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Padding = new Padding(20, 6, 20, 6), BackColor = DesktopTheme.Background };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var title = DesktopTheme.Column(new(SizeType.Absolute, 22), new(SizeType.Absolute, 18)); title.BackColor = DesktopTheme.Background;
+        _workspace.Font = DesktopTheme.Strong;
+        _projectHint.Font = DesktopTheme.Small;
         title.Controls.Add(_workspace, 0, 0); title.Controls.Add(_projectHint, 0, 1); row.Controls.Add(title, 0, 0);
-        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, BackColor = DesktopTheme.Background, Margin = Padding.Empty, Padding = new Padding(0, 3, 0, 0) };
+        var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, FlowDirection = FlowDirection.LeftToRight, BackColor = DesktopTheme.Background, Margin = Padding.Empty, Padding = new Padding(0, 2, 0, 0), AutoSize = true };
+        _loginButton.Width = 135; _loginButton.Quiet = true;
+        actions.Controls.Add(_loginButton);
         actions.Controls.Add(_filesButton); actions.Controls.Add(_changesButton); actions.Controls.Add(_terminalButton); actions.Controls.Add(_computerButton); row.Controls.Add(actions, 1, 0);
-        void ReflowHeader(object? sender, EventArgs e)
-        {
-            if (row.Parent is not TableLayoutPanel body) return;
-            var compact = body.ClientSize.Width < LogicalToDeviceUnits(780);
-            var height = LogicalToDeviceUnits(compact ? 128 : 82);
-            if (body.RowStyles[0].Height != height)
-            {
-                row.SuspendLayout();
-                row.SetColumnSpan(title, compact ? 2 : 1);
-                row.SetColumnSpan(actions, compact ? 2 : 1);
-                row.SetCellPosition(actions, compact ? new TableLayoutPanelCellPosition(0, 1) : new TableLayoutPanelCellPosition(1, 0));
-                row.RowStyles[0] = new RowStyle(compact ? SizeType.Absolute : SizeType.Percent, compact ? LogicalToDeviceUnits(50) : 100);
-                row.RowStyles[1].Height = compact ? LogicalToDeviceUnits(54) : 0;
-                body.RowStyles[0].Height = height; row.ResumeLayout();
-            }
-        }
-        row.ParentChanged += (_, _) => { if (row.Parent is TableLayoutPanel body) { body.SizeChanged += ReflowHeader; ReflowHeader(body, EventArgs.Empty); } };
         return row;
-    }
-
-    private Control BuildConnectionCard()
-    {
-        var row = new MeshLayout(MeshTone.Card, new RowStyle(SizeType.Percent, 100)) { ColumnCount = 2, Margin = new Padding(24, 2, 24, 10), Padding = new Padding(18, 8, 10, 8) };
-        row.ColumnStyles.Clear();
-        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); row.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 184));
-        var copy = DesktopTheme.Column(new(SizeType.Absolute, 25), new(SizeType.Percent, 100)); copy.BackColor = Color.Transparent;
-        copy.Controls.Add(_connectionTitle, 0, 0); copy.Controls.Add(_connectionHint, 0, 1);
-        _connectionHint.AutoEllipsis = true; row.Controls.Add(copy, 0, 0); row.Controls.Add(_loginButton, 1, 0); return row;
     }
 
     private Control BuildConversation()
     {
-        var conversation = DesktopTheme.Column(new(SizeType.Percent, 100), new(SizeType.Absolute, 34), new(SizeType.Absolute, 140));
+        var conversation = DesktopTheme.Column(new(SizeType.Percent, 100), new(SizeType.Absolute, 0), new(SizeType.Absolute, 140));
         _conversation = conversation;
-        conversation.Padding = new Padding(24, 0, 24, 12); conversation.BackColor = DesktopTheme.Background;
+        conversation.Padding = new Padding(16, 0, 16, 12); conversation.BackColor = DesktopTheme.Background;
         var surface = new Panel { Dock = DockStyle.Fill, BackColor = DesktopTheme.Background };
         _welcome = new Panel { Dock = DockStyle.Fill, BackColor = DesktopTheme.Background, AutoScroll = true };
         var welcomeLayout = new MeshLayout(MeshTone.Hero, new(SizeType.Absolute, 24), new(SizeType.Absolute, 58), new(SizeType.Absolute, 48), new(SizeType.Absolute, 44), new(SizeType.Absolute, 12), new(SizeType.Absolute, 144), new(SizeType.Percent, 100));
         welcomeLayout.Dock = DockStyle.Top; welcomeLayout.Height = 438; welcomeLayout.Padding = new Padding(24, 22, 24, 18);
         var eyebrow = DesktopTheme.Label("TỪ Ý TƯỞNG ĐẾN SẢN PHẨM", 8, DesktopTheme.Accent, true); eyebrow.TextAlign = ContentAlignment.MiddleCenter;
         welcomeLayout.Controls.Add(eyebrow, 0, 0);
-        var heading = DesktopTheme.Label("Cùng Muse tạo nên điều mới.", 25, bold: true); heading.TextAlign = ContentAlignment.MiddleCenter;
+        var heading = DesktopTheme.Label("Cùng Muse tạo nên điều mới.", 18, bold: true); heading.TextAlign = ContentAlignment.MiddleCenter;
         _welcomeHint.TextAlign = ContentAlignment.TopCenter;
         welcomeLayout.Controls.Add(heading, 0, 1); welcomeLayout.Controls.Add(_welcomeHint, 0, 2);
         var steps = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Anchor = AnchorStyles.None, AutoSize = true, BackColor = Color.Transparent };
@@ -255,20 +232,35 @@ public sealed partial class AgentWorkspaceControl : UserControl
         };
         _welcome.Controls.Add(welcomeLayout);
         surface.Controls.Add(_chat); surface.Controls.Add(_welcome); conversation.Controls.Add(surface, 0, 0);
-        var composer = new MeshLayout(MeshTone.Composer, new(SizeType.Absolute, 0), new(SizeType.Percent, 100), new(SizeType.Absolute, 48));
+
+        var spacer = new Panel { Dock = DockStyle.Fill, BackColor = DesktopTheme.Background, Visible = false };
+        conversation.Controls.Add(spacer, 0, 1);
+
+        var composerHost = new Panel { Dock = DockStyle.Fill, BackColor = DesktopTheme.Background, Margin = Padding.Empty, Padding = Padding.Empty };
+        var composer = new MeshLayout(MeshTone.Composer, new(SizeType.Absolute, 0), new(SizeType.Percent, 100), new(SizeType.Absolute, 44));
         _composer = composer;
-        composer.Margin = new Padding(0, 4, 0, 0); composer.Padding = new Padding(16, 10, 14, 8);
-        _prompt.BackColor = DesktopTheme.Surface; _prompt.ForeColor = DesktopTheme.Text; _prompt.Font = new Font("Segoe UI", 11);
+        composer.Padding = new Padding(16, 10, 14, 8);
+        _prompt.BackColor = DesktopTheme.Surface; _prompt.ForeColor = DesktopTheme.Text; _prompt.Font = new Font("Segoe UI", 10.5f);
         composer.Controls.Add(_imageStrip, 0, 0); _imageStrip.Visible = false;
         composer.Controls.Add(_prompt, 0, 1);
         _prompt.Enter += (_, _) => { composer.FocusHighlight = true; composer.Invalidate(); };
         _prompt.Leave += (_, _) => { composer.FocusHighlight = false; composer.Invalidate(); };
+
         var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
-        var keyboardHint = DesktopTheme.Label("Enter để gửi · Shift+Enter xuống dòng · Ctrl+V dán ảnh", 8.5f, DesktopTheme.Muted);
-        footer.Controls.Add(keyboardHint, 0, 0);
-        footer.SizeChanged += (_, _) => keyboardHint.Visible = footer.Width >= 440;
+
+        var statusHost = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
+        statusHost.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        statusHost.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
+        statusHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _state.AutoEllipsis = true;
+        _state.Font = DesktopTheme.Small;
+        _state.ForeColor = DesktopTheme.Muted;
+        _state.TextChanged += (_, _) => _tips.SetToolTip(_state, _state.Text);
+        statusHost.Controls.Add(_activityGlyph, 0, 0);
+        statusHost.Controls.Add(_state, 1, 0);
+        footer.Controls.Add(statusHost, 0, 0);
 
         var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
         actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -291,17 +283,19 @@ public sealed partial class AgentWorkspaceControl : UserControl
         footer.Controls.Add(actions, 1, 0);
         composer.Controls.Add(footer, 0, 2);
 
-        var status = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = DesktopTheme.Background, Margin = Padding.Empty };
-        status.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        status.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
-        status.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        status.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 88));
-        _state.AutoEllipsis = true;
-        _state.TextChanged += (_, _) => _tips.SetToolTip(_state, _state.Text);
-        var details = new CleanButton { Text = "Chi tiết", Font = new Font("Segoe UI", 9), Quiet = true, Dock = DockStyle.Fill, Margin = Padding.Empty, AccessibleName = "Xem chi tiết hoạt động" };
-        details.Click += (_, _) => ToggleDrawer(2, forceOpen: true);
-        status.Controls.Add(_activityGlyph, 0, 0); status.Controls.Add(_state, 1, 0); status.Controls.Add(details, 2, 0);
-        conversation.Controls.Add(status, 0, 1); conversation.Controls.Add(composer, 0, 2); return conversation;
+        void CenterComposer()
+        {
+            var hostWidth = composerHost.ClientSize.Width;
+            var hostHeight = composerHost.ClientSize.Height;
+            if (hostWidth < 20 || hostHeight < 20) return;
+            var compWidth = Math.Min(820, Math.Max(260, hostWidth - 36));
+            var left = (hostWidth - compWidth) / 2;
+            composer.SetBounds(left, 2, compWidth, Math.Max(40, hostHeight - 4));
+        }
+        composerHost.Controls.Add(composer);
+        composerHost.SizeChanged += (_, _) => CenterComposer();
+        conversation.Controls.Add(composerHost, 0, 2);
+        return conversation;
     }
 
     private Control BuildDetails()
@@ -374,7 +368,9 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _connectionTitle.Text = title;
         _connectionTitle.ForeColor = connected ? DesktopTheme.Success : DesktopTheme.Text;
         _connectionHint.Text = hint;
-        _loginButton.Text = preparing ? "Đang chuẩn bị…" : connected ? "Tài khoản Muse" : "Kết nối Muse";
+        _loginButton.Text = preparing ? "Đang chuẩn bị…" : connected ? "● Đã kết nối" : "Kết nối Muse";
+        _loginButton.ForeColor = connected ? DesktopTheme.Success : DesktopTheme.Text;
+        _tips.SetToolTip(_loginButton, connected ? $"Tài khoản Muse: {title}\n{hint}" : "Nhấn để kết nối tài khoản Muse");
         _loginButton.Enabled = !preparing && !_busy;
         _welcomeConnect.Enabled = !connected && !preparing && !_busy;
         _welcomeConnect.Text = connected ? "Đã kết nối" : "Kết nối Muse";

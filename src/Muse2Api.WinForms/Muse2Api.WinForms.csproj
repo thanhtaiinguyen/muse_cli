@@ -9,7 +9,7 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>Muse</AssemblyName>
     <Product>Muse Workspace</Product>
-    <Version>0.8.4</Version>
+    <Version>0.8.5</Version>
     <RootNamespace>Muse2Api.WinForms</RootNamespace>
   </PropertyGroup>
   <ItemGroup>

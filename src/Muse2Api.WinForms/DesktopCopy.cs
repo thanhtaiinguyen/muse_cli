@@ -5,6 +5,8 @@ internal static class DesktopCopy
     public static string FriendlyError(string message)
     {
         var text = message.ToLowerInvariant();
+        if (text.Contains("upstream_response_unavailable"))
+            return "App chưa đọc được phản hồi hoàn tất từ Muse web. Đã dừng chờ và giữ cuộc chat hiện tại, không tự gửi lại. Đây không phải thông báo hết lượt của tài khoản; xem Terminal trước khi tiếp tục.";
         if (text.Contains("stopped making progress") || text.Contains("web state unavailable") || text.Contains("web stopped responding") || text.Contains("web page closed"))
             return "Muse web đã ngừng phản hồi hoặc mất kết nối. App đã dừng chờ và giữ cuộc chat hiện tại; không tự gửi lại yêu cầu. Xem Terminal trước khi tiếp tục.";
         if (text.Contains("rate limit") || text.Contains("too many requests")) return "Muse đang giới hạn tần suất. Đã dừng gửi và giữ cuộc chat hiện tại. Hãy đợi rồi thử tiếp; không cần đăng nhập lại.";

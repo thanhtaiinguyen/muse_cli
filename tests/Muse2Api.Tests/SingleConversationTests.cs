@@ -147,7 +147,7 @@ public class SingleConversationTests
     }
     private static Settings BrowserSettings(string root) => new()
     {
-        DataDir = root, Headless = true, ChromiumPath = DesktopProfile.FindBrowser(), ChatTimeout = 10, FirstTokenTimeout = 5, PageReadyTimeout = 5,
+        DataDir = root, Headless = true, ChromiumPath = DesktopProfile.FindBrowser(), ChatTimeout = 10, FirstTokenTimeout = 5, PageReadyTimeout = 5, ReplyRenderGrace = 1,
     };
 
     [BrowserFact]
@@ -212,6 +212,50 @@ public class SingleConversationTests
             Assert.Contains("without a completed reply", failure.Message); Assert.Equal(1, fixture.Submissions);
         }
         finally { await driver.ShutdownAsync(); }
+    }
+
+    [BrowserFact]
+    public async Task IdenticalReplyInReplacedBranchIsNewButRerenderedOldReplyIsNot()
+    {
+        using var dir=new TempDirectory();var account=Account();
+        var fixture=new WebFixture { Script="""
+            let turn=0; const send=document.querySelector('button').onclick;
+            document.querySelector('button').onclick=async()=>{
+              if(++turn<=2){messages.replaceChildren();const user=document.createElement('div');user.className='group/msg ms-auto items-end';user.textContent='APP_STATE observation '+turn;messages.append(user);}
+              else {messages.querySelectorAll('.hatch-agent-bubble-bg').forEach(e=>e.remove());const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);setTimeout(()=>stop.remove(),700);}
+              await send();
+            };
+            """ };
+        var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try
+        {
+            await fixture.Install(driver,account);
+            var first=await Reply(driver,account,new(){("user","task")});
+            var second=await Reply(driver,account,new(){("user","next observation")});
+            Assert.Equal(first,second);
+            // Recreating the old assistant node alone is not proof of a reply
+            // to a new user turn, and must never execute its old tool plan.
+            var failure=await Assert.ThrowsAsync<UpstreamException>(()=>Reply(driver,account,new(){("user","unchanged UI") }));
+            Assert.Equal("upstream_response_unavailable",failure.Code);
+            Assert.Equal(3,fixture.Submissions);Assert.Equal(1,fixture.NewThreads);
+        }
+        finally {await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
+    public async Task CommittedReplyMayRenderMoreThanTwoSecondsAfterStopDisappears()
+    {
+        using var dir=new TempDirectory();var account=Account();
+        var fixture=new WebFixture { Script="""
+            const oldBubble=bubble; bubble=text=>{
+              const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);
+              setTimeout(()=>stop.remove(),700);setTimeout(()=>oldBubble(text),4000);
+            };
+            """ };
+        var driver=new BrowserDriver(new Settings{DataDir=dir.Root,Headless=true,ChromiumPath=DesktopProfile.FindBrowser(),ChatTimeout=12,FirstTokenTimeout=10,ReplyRenderGrace=6});
+        await driver.StartupAsync();
+        try {await fixture.Install(driver,account);Assert.Contains("fixture done",await Reply(driver,account,new(){("user","task")}));Assert.Equal(1,fixture.Submissions);}
+        finally {await driver.ShutdownAsync();}
     }
 
     [BrowserFact]

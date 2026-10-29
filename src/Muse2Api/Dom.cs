@@ -67,6 +67,20 @@ public static class Dom
           scrollers.forEach(e => { e.scrollTop = e.scrollHeight; });
           const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})].filter(visible);
           const last = bubbles.length ? replyText(bubbles[bubbles.length - 1]).trim() : '';
+          // The site can render a branch with the same bubble count and the
+          // same JSON as the previous branch. Establish provenance after the
+          // new user message instead of mistaking equal text for an old reply.
+          const ids = window.__museReplyNodeIds ||= { nodes: new WeakMap(), next: 1 };
+          const nodeId = e => { if (!e) return ''; if (!ids.nodes.has(e)) ids.nodes.set(e, String(ids.next++)); return ids.nodes.get(e); };
+          const groups = [...document.querySelectorAll('[class~="group/msg"]')].filter(visible);
+          const users = groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end') && !e.querySelector({{Q(AgentBubble)}}));
+          const user = users.length ? users[users.length - 1] : null;
+          const agent = bubbles.length ? bubbles[bubbles.length - 1] : null;
+          const userText = user ? replyText(user).trim() : '';
+          let fingerprint = 2166136261;
+          for (let i=0;i<userText.length;i++) fingerprint = Math.imul(fingerprint ^ userText.charCodeAt(i), 16777619);
+          const userKey = user ? userText.length + ':' + (fingerprint >>> 0) : '';
+          const replyAfterUser = !!(user && agent && (user.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING));
           const atts = [...document.querySelectorAll({{Q(Attachment)}})].map(a => {
             const v = a.querySelector('video'), i = a.querySelector('img');
             const m = v || i;
@@ -85,7 +99,7 @@ public static class Dom
           const generating = buttons.some(b => !b.disabled && /^(stop(?: generating| generation| response)?|dừng(?: tạo| phản hồi)?|停止(?:生成)?)(?:[.!…\s]*)$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim()));
           const error = [...document.querySelectorAll('[role="alert"]')].filter(visible)
             .map(e => e.innerText || '').find(t => /something went wrong|failed to (?:send|generate)|connection (?:lost|failed)|network error|đã xảy ra lỗi/i.test(t)) || '';
-          return { agentCount: bubbles.length, lastText: last, rateLimited, error,
+          return { agentCount: bubbles.length, lastText: last, replyKey: nodeId(agent), replyKeys: bubbles.map(nodeId), userKey, replyAfterUser, rateLimited, error,
                     generating,
                     approval: [...document.querySelectorAll({{Q(ApprovalCard)}})].some(visible),
                     attachments: atts, tail };

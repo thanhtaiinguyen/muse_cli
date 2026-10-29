@@ -68,8 +68,34 @@ internal static class Program
                 }
             }
 
+            form.Visible = true;
+            void RenderTree(Control control, Point origin, Bitmap target)
+            {
+                if (!control.Visible) return;
+                if (control.Parent is SplitContainer s && s.Panel2Collapsed && control == s.Panel2) return;
+                foreach (Control child in control.Controls)
+                {
+                    if (!child.Visible) continue;
+                    if (child.Parent is SplitContainer sc && sc.Panel2Collapsed && child == sc.Panel2) continue;
+                    var childOrigin = new Point(origin.X + child.Left, origin.Y + child.Top);
+                    try
+                    {
+                        if (child.Width > 0 && child.Height > 0)
+                        {
+                            using var cbmp = new Bitmap(child.Width, child.Height);
+                            child.DrawToBitmap(cbmp, new Rectangle(0, 0, child.Width, child.Height));
+                            using var g = Graphics.FromImage(target);
+                            g.DrawImage(cbmp, childOrigin);
+                        }
+                    }
+                    catch { }
+                    RenderTree(child, childOrigin, target);
+                }
+            }
+
             using var bmp = new Bitmap(1000, 720);
-            transcript.DrawToBitmap(bmp, new Rectangle(0, 0, 1000, 720));
+            using (var g = Graphics.FromImage(bmp)) { g.Clear(DesktopTheme.Background); }
+            RenderTree(form, Point.Empty, bmp);
             var previewPath = Path.Combine(outDir, "codex_chat_preview.png");
             bmp.Save(previewPath, System.Drawing.Imaging.ImageFormat.Png);
 
@@ -84,31 +110,13 @@ internal static class Program
                     Size = new Size(1280, 820)
                 };
                 mainForm.CreateControl();
+                mainForm.Visible = true;
                 using var mainBmp = new Bitmap(1280, 820);
                 using (var g = Graphics.FromImage(mainBmp))
                 {
                     g.Clear(DesktopTheme.Background);
                 }
-                void RenderTree(Control control, Point origin)
-                {
-                    foreach (Control child in control.Controls)
-                    {
-                        var childOrigin = new Point(origin.X + child.Left, origin.Y + child.Top);
-                        try
-                        {
-                            if (child.Width > 0 && child.Height > 0)
-                            {
-                                using var cbmp = new Bitmap(child.Width, child.Height);
-                                child.DrawToBitmap(cbmp, new Rectangle(0, 0, child.Width, child.Height));
-                                using var g = Graphics.FromImage(mainBmp);
-                                g.DrawImage(cbmp, childOrigin);
-                            }
-                        }
-                        catch { }
-                        RenderTree(child, childOrigin);
-                    }
-                }
-                RenderTree(mainForm, Point.Empty);
+                RenderTree(mainForm, Point.Empty, mainBmp);
                 var mainPreviewPath = Path.Combine(outDir, "main_window_preview.png");
                 mainBmp.Save(mainPreviewPath, System.Drawing.Imaging.ImageFormat.Png);
                 Console.WriteLine("MAIN_RENDER_OK: " + mainPreviewPath);
@@ -117,6 +125,18 @@ internal static class Program
             {
                 Console.WriteLine("MAIN_RENDER_WARN: " + ex.Message);
             }
+
+            // Scroll regression: with more cards than the viewport can show, the
+            // transcript must stay pinned to the bottom as content keeps growing.
+            for (var i = 0; i < 30; i++) transcript.AddToolCall("run_command", null, "dotnet test").SetResult("ok", isError: false);
+            var growing = transcript.AddAssistantMessage("Dòng đầu của câu trả lời dài.", stream: false);
+            transcript.ScrollToBottom();
+            Application.DoEvents();
+            if (!transcript.IsNearBottom()) { Console.WriteLine("SCROLL_ERROR: not at bottom after ScrollToBottom"); return 5; }
+            transcript.UpdateMessage(growing, string.Join("\n", Enumerable.Range(1, 60).Select(n => $"Dòng nội dung số {n} để câu trả lời vượt chiều cao khung chat.")));
+            Application.DoEvents();
+            if (!transcript.IsNearBottom()) { Console.WriteLine("SCROLL_ERROR: view did not follow growing content"); return 5; }
+            Console.WriteLine("SCROLL_CHECK_OK");
 
             Console.WriteLine("RENDER_CHECK_OK: " + previewPath);
             return 0;

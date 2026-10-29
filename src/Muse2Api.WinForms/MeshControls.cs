@@ -62,27 +62,21 @@ internal sealed class MeshLayout : TableLayoutPanel
         var ratio = Math.Min(1f, 1200f / Math.Max(Width, Height));
         var bitmap = new Bitmap(Math.Max(2, (int)(Width * ratio)), Math.Max(2, (int)(Height * ratio)));
         using var graphics = Graphics.FromImage(bitmap);
-        graphics.Clear(Tone == MeshTone.Sidebar ? DesktopTheme.Sidebar : Tone is MeshTone.Card or MeshTone.Composer ? DesktopTheme.Surface : DesktopTheme.Background);
-        if (Tone == MeshTone.Composer) return bitmap;
-        var strength = Tone == MeshTone.Hero ? 1f : Tone == MeshTone.Card ? .16f : .22f;
-        if (DesktopTheme.Mode == DesktopTheme.ThemeMode.Light) strength *= .48f;
-        void Cloud(float x, float y, float size, Color color, int opacity)
+        var baseColor = Tone == MeshTone.Sidebar ? DesktopTheme.Sidebar : Tone is MeshTone.Card or MeshTone.Composer ? DesktopTheme.Surface : DesktopTheme.Background;
+        graphics.Clear(baseColor);
+        if (Tone == MeshTone.Hero)
         {
             var w = bitmap.Width; var h = bitmap.Height;
-            var diameter = Math.Max(w, h) * size;
+            var diameter = Math.Max(w, h) * 1.2f;
             using var shape = new GraphicsPath();
-            shape.AddEllipse(x * w - diameter / 2, y * h - diameter / 2, diameter, diameter);
+            shape.AddEllipse(w * 0.5f - diameter / 2, -diameter * 0.35f, diameter, diameter);
             using var glow = new PathGradientBrush(shape)
             {
-                CenterColor = Color.FromArgb((int)(opacity * strength), color),
-                SurroundColors = new[] { Color.FromArgb(0, color) },
+                CenterColor = Color.FromArgb(DesktopTheme.Mode == DesktopTheme.ThemeMode.Dark ? 22 : 10, DesktopTheme.Accent),
+                SurroundColors = new[] { Color.FromArgb(0, DesktopTheme.Accent) },
             };
             graphics.FillPath(glow, shape);
         }
-        Cloud(.12f, .15f, 1.3f, Color.FromArgb(79, 70, 229), 180);
-        Cloud(.86f, .10f, .9f, Color.FromArgb(6, 182, 212), 100);
-        Cloud(.9f, .9f, 1.05f, Color.FromArgb(244, 114, 182), 135);
-        Cloud(.15f, 1f, .75f, Color.FromArgb(251, 191, 36), 42);
         return bitmap;
     }
 
