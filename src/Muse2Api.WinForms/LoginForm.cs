@@ -61,7 +61,7 @@ public sealed class LoginForm : Form
     {
         try
         {
-            var data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "WebView2");
+            var data = Path.Combine(DesktopDataPaths.Root, "WebView2");
             var environment = await CoreWebView2Environment.CreateAsync(null, data);
             await _web.EnsureCoreWebView2Async(environment);
             if (IsDisposed) return;
