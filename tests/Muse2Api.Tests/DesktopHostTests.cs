@@ -14,7 +14,9 @@ public class DesktopHostTests
         var first = DesktopProfile.Create(directory.Root, browserPath: "");
         Assert.False(string.IsNullOrWhiteSpace(first.ApiKey));
         Assert.Equal(first.ApiKey, first.EffectiveAdminKey);
-        Assert.Equal(first.ApiKey, File.ReadAllText(first.KeyFile));
+        Assert.Equal(first.ApiKey, PrivateDataProtection.ReadFile(first.KeyFile));
+        if (OperatingSystem.IsWindows())
+            Assert.DoesNotContain(first.ApiKey, File.ReadAllText(first.KeyFile));
         Assert.Equal("127.0.0.1", first.Host);
         Assert.Equal("browser", first.Driver);
         Assert.Equal(first.ApiKey, DesktopProfile.Create(directory.Root, browserPath: "").ApiKey);
