@@ -1,0 +1,46 @@
+name: Package Muse for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      MUSE2API_HEADLESS: '1'
+      MUSE_BROWSER_TESTS: '1'
+    steps:
+      - name: Checkout branch under test
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and run full solution tests
+        run: |
+          dotnet build Muse2Api.sln -c Release
+          dotnet test tests/Muse2Api.Tests/Muse2Api.Tests.csproj -c Release --no-restore
+          dotnet test tests/Muse2Api.Computer.Tests/Muse2Api.Computer.Tests.csproj -c Release
+      - name: Publish and verify packaged app
+        shell: pwsh
+        run: ./scripts/Publish-Desktop.ps1
+      - name: Create ZIP and SHA256 checksum
+        shell: pwsh
+        run: |
+          Compress-Archive -Path 'dist/Muse/*' -DestinationPath 'Muse-win-x64.zip' -CompressionLevel Optimal
+          $hash = (Get-FileHash 'Muse-win-x64.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Muse-win-x64.zip" | Set-Content -Path 'Muse-win-x64.zip.sha256' -Encoding ascii
+      - name: Upload testable Windows package
+        uses: actions/upload-artifact@v6
+        with:
+          name: muse-win-x64-${{ github.run_number }}
+          path: |
+            Muse-win-x64.zip
+            Muse-win-x64.zip.sha256
+          if-no-files-found: error
