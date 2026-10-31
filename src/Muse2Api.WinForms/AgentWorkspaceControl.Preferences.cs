@@ -16,6 +16,6 @@ public sealed partial class AgentWorkspaceControl
         try { File.WriteAllText(Path.Combine(dataDirectory, "ui_theme.txt"), DesktopTheme.Mode.ToString()); } catch { }
         DesktopTheme.Apply(this);
         if (_tools is not null) RefreshTree();
-        _state.Text = dialog.Turbo ? "Chế độ Turbo đang bật — Muse tự chạy mọi thao tác không hỏi trước và trả lời bằng tiếng Việt." : dialog.ReadOnly ? "Chế độ chỉ xem — Muse không được sửa tệp hoặc chạy lệnh." : "Mọi thay đổi sẽ được hỏi trước khi thực hiện.";
+        _state.Text = dialog.Turbo ? "Chế độ Turbo — tự sửa file thường; chạy lệnh hoặc sửa file nhạy cảm vẫn cần duyệt." : dialog.ReadOnly ? "Chế độ chỉ xem — Muse không được sửa tệp hoặc chạy lệnh." : "Mọi thay đổi sẽ được hỏi trước khi thực hiện.";
     }
 }

@@ -247,5 +247,28 @@ cuộc chat lỗi đã có, chặn POST; không gửi chat thật trong đợt k
 
 Sửa cuộn hội thoại sau 0.8.5: ChatTranscript nay bám đáy theo trạng thái stick-to-bottom. Trước đây chỉ cuộn khi thêm thẻ mới nên khi thẻ Thinking thu gọn, thẻ công cụ đổi trạng thái hoặc chữ streaming làm tăng chiều cao thì khung chat đứng yên và nội dung mới tuột khỏi tầm nhìn. Nay mỗi lần chiều cao nội dung thay đổi, nếu người dùng đang ở gần đáy thì khung tự cuộn xuống cuối, kèm một lần cuộn hoãn sau khi layout xong; nếu người dùng đã kéo lên đọc lại thì không bị giật xuống nữa. Kiểm tra render-check ngoài màn hình bổ sung tình huống 30 thẻ công cụ và tin nhắn dài 60 dòng, kết quả SCROLL_CHECK_OK và RENDER_CHECK_OK; build toàn bộ giải pháp 0 cảnh báo, 0 lỗi.
 
+Đợt 0.8.6 tái hiện lượt đọc thứ hai bị lấy lại tool call của lượt đầu khi web
+tải lại lịch sử: trước sửa nhận `first.txt, first.txt, second.txt`; sau sửa chỉ
+đọc `first.txt, second.txt`, cùng một thread. Mỗi lần gửi nội bộ có dấu mốc
+riêng trong tin người dùng; chỉ phản hồi nằm sau đúng dấu mốc mới được dùng,
+không suy luận từ việc số khối chat hay văn bản lịch sử thay đổi.
+`ToolCallValidationTests` kiểm tra JSON bị cắt, envelope sai kiểu, arguments
+sai kiểu, công cụ không tồn tại và batch native có phần tử lỗi: không được
+âm thầm coi là câu trả lời cuối hoặc thực hiện phần lệnh hợp lệ trước lỗi.
+`tests/Muse2Api.WinForms.Checks` chạy STA/message loop ngoài màn hình, tái hiện
+và kiểm tra vị trí khi lượt chat thứ hai thêm thinking/tool cards, cùng việc
+giữ vị trí khi người dùng đang đọc lịch sử. Script publish chạy kiểm tra này
+trước khi thay hoặc xóa bản cũ; tuyệt đối không gọi Show/ShowDialog.
+
+Đợt tích hợp .NET 10 0.8.7: giữ bộ kiểm tra lượt thứ hai/cuộn/tool call của
+0.8.6, bổ sung kiểm tra Turbo với đường dẫn Windows tương đương, alias shell,
+cấu hình build/credential nhạy cảm, cache browser session mã hóa bị hỏng và
+khôi phục. Preview marker được kiểm tra bằng WinForms ngoài màn hình để xác
+nhận exe dùng hồ sơ riêng; gateway và workspace đều tôn trọng profile override.
+266/266 core/browser đạt; 2 computer tests đạt, 3 bài cần cửa sổ thật để lại
+cho kiểm tra tay. Xem MANUAL_TESTING_NET10.md. Script Prepare-PreviewProfile.ps1
+được thử bằng file giả: không ghi nguồn và không ghi đè dữ liệu preview có sẵn.
+Người dùng đã báo kiểm tra tay OK ngày 31/10/2026 trước khi yêu cầu push bản tích hợp lên GitHub.
+
 Khi báo lỗi, gửi bước xảy ra và thông báo trong giao diện. Không gửi mật khẩu,
 giá trị cookie, key hay file hồ sơ cá nhân.

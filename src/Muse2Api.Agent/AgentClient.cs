@@ -229,11 +229,12 @@ public sealed class AgentClient : IDisposable
         if (message?["tool_calls"] is JsonArray native)
         {
             calls.Clear();
-            foreach (var tc in native.OfType<JsonObject>())
+            foreach (var node in native)
             {
+                if (node is not JsonObject tc) { calls.Add(new("__parse_error__", new() { ["error"] = "Native tool call must be a JSON object." })); continue; }
                 var fn = tc["function"] as JsonObject;
                 var name = fn?["name"]?.GetValue<string>();
-                if (string.IsNullOrEmpty(name)) continue;
+                if (string.IsNullOrEmpty(name)) { calls.Add(new("__parse_error__", new() { ["error"] = "Native tool call is missing a function name." })); continue; }
                 calls.Add(NativeCall(name, fn?["arguments"] is JsonValue av && av.TryGetValue<string>(out var s) ? s : fn?["arguments"]?.ToJsonString() ?? "{}"));
             }
         }
@@ -251,7 +252,7 @@ public sealed class AgentClient : IDisposable
         {
             var args = JsonNode.Parse(string.IsNullOrWhiteSpace(arguments) ? "{}" : arguments) as JsonObject
                 ?? throw new JsonException("Tool arguments must be an object");
-            return ToolCallParser.Normalize(new(name, args));
+            return ToolCallParser.Validate(new(name, args));
         }
         catch (JsonException ex) { return new("__parse_error__", new() { ["error"] = "Invalid native tool arguments: " + ex.Message }); }
     }

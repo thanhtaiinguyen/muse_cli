@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 
 namespace Muse2Api.WinForms;
@@ -163,12 +164,19 @@ internal sealed class ThemedLabel : Label
 
 internal sealed class CleanButton : Control, IButtonControl
 {
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Primary { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Quiet { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Active { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public WorkspaceIcon Icon { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string? Description { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public DialogResult DialogResult { get; set; } = DialogResult.None;
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public AutoSizeMode AutoSizeMode { get; set; }
     private bool _hover, _pressed, _isDefault;
 

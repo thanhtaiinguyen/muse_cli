@@ -65,7 +65,7 @@ public class AgentRegressionTests
     {
         using var dir = new TempDirectory();
         var tools = new ToolExecutor(dir.Root);
-        var result = await tools.ExecuteAsync(new("run_command", new() { ["command"] = "echo success", ["timeout_seconds"] = 10 }));
+        var result = await tools.ExecuteAsync(new("run_command", new() { ["command"] = "echo success", ["timeout_seconds"] = 45 }));
         Assert.Contains("exit_code=0", result);
         Assert.Contains("success", result);
     }

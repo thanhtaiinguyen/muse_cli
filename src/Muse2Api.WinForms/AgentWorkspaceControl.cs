@@ -12,10 +12,10 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private readonly Func<Task> _login;
     private readonly Func<Task<bool>> _ensureReady;
     private readonly Action _settings;
-    private readonly ChatSessionStore _store = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "AgentSessions"));
+    private readonly ChatSessionStore _store = new(Path.Combine(DesktopDataPaths.Root, "AgentSessions"));
     private readonly ConcurrentQueue<AgentEvent> _events = new();
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 100 };
-    private readonly string _preferences = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Muse2Api.WinForms", "agent_workspace.json");
+    private readonly string _preferences = Path.Combine(DesktopDataPaths.Root, "agent_workspace.json");
     private ToolExecutor? _tools;
     private ChatSession? _session;
     private CancellationTokenSource? _cancel;
@@ -75,7 +75,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _shell.Items.AddRange(new object[] { "powershell", "cmd", "bash" }); _shell.SelectedIndex = 0;
         _terminalShell.Items.AddRange(new object[] { "PowerShell", "CMD", "Bash" }); _terminalShell.SelectedIndex = 0;
         _terminalShell.SelectedIndexChanged += (_, _) => { if (!_busy) _shell.SelectedIndex = _terminalShell.SelectedIndex; };
-        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — tự chạy, không hỏi" }); _permissions.SelectedIndex = 0;
+        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — hỏi trước khi chạy lệnh" }); _permissions.SelectedIndex = 0;
         _timer.Tick += async (_, _) =>
         {
             DrainEvents();
@@ -102,7 +102,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _sessions.SelectedIndexChanged += async (_, _) => { if (!_binding && !_busy && _sessions.SelectedItem is ChatSession session) await LoadSession(session.Id); };
         _sessions.DrawItem += DrawSession;
         _tree.BeforeExpand += (_, e) => { if (e.Node is { } node && node.Nodes.Count == 1 && node.Nodes[0].Tag is null) Populate(node); };
-        _tree.NodeMouseDoubleClick += async (_, e) => { if (e.Node.Tag is string path && File.Exists(path)) { await OpenFile(path); ToggleDrawer(0, forceOpen: true); } };
+        _tree.NodeMouseDoubleClick += async (_, e) => { if (e.Node?.Tag is string path && File.Exists(path)) { await OpenFile(path); ToggleDrawer(0, forceOpen: true); } };
         _changes.SelectedIndexChanged += (_, _) => _diff.Text = (_changes.SelectedItem as WorkspaceChange)?.Diff ?? "Chưa có thay đổi nào trong lần làm việc này.";
         _editor.TextChanged += (_, _) => { if (!_settingEditor) { _dirty = _editor.Text != _editorDisplayBaseline; UpdateEditorTitle(); } };
         _editor.KeyDown += async (_, e) => { if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; await SaveEditor(); } };

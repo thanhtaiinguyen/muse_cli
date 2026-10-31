@@ -12,7 +12,18 @@ internal sealed class TempDirectory : IDisposable
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "muse2api-tests", Guid.NewGuid().ToString("N"));
     public TempDirectory() => Directory.CreateDirectory(Root);
     public string File(string name) => Path.Combine(Root, name);
-    public void Dispose() => Directory.Delete(Root, recursive: true);
+    public void Dispose()
+    {
+        // Windows can retain a working-directory handle briefly after a killed
+        // child process exits. Retry transient locks, but still fail on leaks.
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            if (!Directory.Exists(Root)) return;
+            try { Directory.Delete(Root, recursive: true); return; }
+            catch (IOException) when (attempt < 19) { Thread.Sleep(100); }
+            catch (UnauthorizedAccessException) when (attempt < 19) { Thread.Sleep(100); }
+        }
+    }
 }
 
 internal sealed class GatewayHost : IAsyncDisposable

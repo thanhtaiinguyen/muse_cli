@@ -23,6 +23,8 @@ public sealed class ChatTranscript : UserControl
             DoubleBuffered = true;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
         }
+
+        protected override Point ScrollToControl(Control activeControl) => DisplayRectangle.Location;
     }
 
     private readonly BufferedPanel _viewport = new() { Dock = DockStyle.Fill, AutoScroll = true };
@@ -127,6 +129,7 @@ public sealed class ChatTranscript : UserControl
         var follow = _stickToBottom || IsNearBottom() || card is ChatMessageCard { IsUser: true };
         card.ContentHeightChanged += (_, _) =>
         {
+            if (_layingOut) return;
             Reflow();
             if (_stickToBottom) QueueScrollToBottom();
         };
@@ -183,19 +186,20 @@ public sealed class ChatTranscript : UserControl
             var leftMargin = Math.Max(18, (clientWidth - columnWidth) / 2);
             var y = 16;
             _viewport.SuspendLayout();
+            var scroll = _viewport.AutoScrollPosition;
             foreach (var card in _cards)
             {
                 if (card is ChatMessageCard { IsUser: true } userCard)
                 {
                     var bubbleWidth = userCard.MeasureBubbleWidth(columnWidth);
                     userCard.Width = bubbleWidth;
-                    userCard.Location = new Point(leftMargin + columnWidth - bubbleWidth, y);
+                    userCard.Location = new Point(leftMargin + columnWidth - bubbleWidth + scroll.X, y + scroll.Y);
                     y += userCard.Height + 14;
                 }
                 else
                 {
                     card.Width = columnWidth;
-                    card.Location = new Point(leftMargin, y);
+                    card.Location = new Point(leftMargin + scroll.X, y + scroll.Y);
                     y += card.Height + (card is ToolCallCard ? 8 : 14);
                 }
             }

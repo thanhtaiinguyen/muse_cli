@@ -351,11 +351,11 @@ public sealed class BrowserDriver : IMuseDriver
     private async Task<System.Text.Json.Nodes.JsonNode?> PageState(IPage page)
         => await Eval(page, Dom.PageState);
 
-    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default)
+    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default, string? localRequestId = null)
     {
         if (tab.RateLimited) throw UpstreamException.Quota("Muse returned rate limit (HTTP 429). Conversation retained; no automatic retry or replacement chat.");
         if (tab.Page.IsClosed) throw UpstreamException.ResponseUnavailable("Muse web page closed; stopped waiting. Conversation retained.");
-        var state = await Eval(tab.Page, Dom.ChatState, cancel)
+        var state = await Eval(tab.Page, localRequestId is null ? Dom.ChatState : Dom.ReadChatState(localRequestId), cancel)
             ?? throw UpstreamException.ResponseUnavailable("Muse web state unavailable; stopped waiting. Conversation retained.");
         if (BoolNode(state, "rateLimited")) throw UpstreamException.Quota("Muse shows a rate limit notice. Conversation retained; no automatic retry or replacement chat.");
         if (!string.IsNullOrWhiteSpace(Str(state, "error")))
@@ -528,7 +528,9 @@ public sealed class BrowserDriver : IMuseDriver
                 // never silently creates another upstream thread on the next run.
                 _localConversations.Save(account.Id, hint, IsThreadUrl(tab.Page.Url) ? tab.Page.Url : saved?.Url ?? "", true, imageHash);
                 await Attach(tab, images, req.Cancel);
-                await Send(tab, prompt, req.Cancel);
+                var requestId = Guid.NewGuid().ToString("N");
+                state!["submittedRequestId"] = requestId;
+                await Send(tab, "MUSE_LOCAL_REQUEST_ID: " + requestId + "\n(Transport metadata for the app; do not echo it in your answer.)\n\n" + prompt, req.Cancel);
                 if (LocalConversationStore.IsThread(tab.Page.Url))
                 {
                     tab.ThreadUrl = tab.Page.Url;
@@ -580,6 +582,7 @@ public sealed class BrowserDriver : IMuseDriver
         var (tab, baseState) = await BeginChat(account, req);
         var baseCount = IntNode(baseState, "agentCount");
         var baseText = Str(baseState, "lastText") ?? "";
+        var submittedRequestId = Str(baseState, "submittedRequestId") ?? "";
         var baseUserKey = Str(baseState, "userKey") ?? "";
         var baseReplyKeys = (baseState?["replyKeys"] as System.Text.Json.Nodes.JsonArray)?
             .Select(n => n?.GetValue<string>() ?? "").ToHashSet() ?? new HashSet<string>();
@@ -604,25 +607,28 @@ public sealed class BrowserDriver : IMuseDriver
                 if (!gotFirst && elapsed > _settings.FirstTokenTimeout)
                     throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.");
                 await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
-                var st = await ChatState(tab, req.Cancel);
+                var st = await ChatState(tab, req.Cancel, req.LocalTools ? submittedRequestId : null);
                 if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
                 else if (sawGenerating) stoppedAt ??= elapsed;
-                var snapshot = IntNode(st, "agentCount") + ":" + BoolNode(st, "generating") + ":" + (Str(st, "lastText") ?? "");
+                var responseText = Str(st, req.LocalTools ? "localReplyText" : "lastText") ?? "";
+                var snapshot = BoolNode(st, "generating") + ":" + responseText;
                 if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
                 if (gotFirst && elapsed - progressAt > _settings.ChatIdleTimeout)
                     throw UpstreamException.ResponseUnavailable("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
                 if (req.LocalTools && elapsed >= diagnosticAt)
                 {
-                    Diagnostic?.Invoke($"local_reply_poll seconds={(int)elapsed} bubbles={IntNode(st, "agentCount")} baseline={baseCount} chars={(Str(st, "lastText") ?? "").Length} generating={BoolNode(st, "generating")}");
+                    Diagnostic?.Invoke($"local_reply_poll seconds={(int)elapsed} bubbles={IntNode(st, "agentCount")} baseline={baseCount} chars={responseText.Length} bound={BoolNode(st, "localReplyBound")} generating={BoolNode(st, "generating")}");
                     diagnosticAt = elapsed + 10;
                 }
                 if (BoolNode(st, "approval")) { await DenyApprovals(tab); continue; }
-                var text = Str(st, "lastText") ?? "";
+                var text = responseText;
                 var currentUserKey = Str(st, "userKey") ?? "";
                 var replyKey = Str(st, "replyKey") ?? "";
                 var newMessage = BoolNode(st, "replyAfterUser") && currentUserKey.Length > 0 && currentUserKey != baseUserKey
                     && replyKey.Length > 0 && !baseReplyKeys.Contains(replyKey);
-                var isNew = newMessage || IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
+                var isNew = req.LocalTools
+                    ? submittedRequestId.Length > 0 && Str(st, "localRequestId") == submittedRequestId && BoolNode(st, "localReplyBound")
+                    : newMessage || IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
                 if (!isNew || text.Length == 0)
                 {
                     if (stoppedAt is { } idleAt && elapsed - idleAt > _settings.ReplyRenderGrace)

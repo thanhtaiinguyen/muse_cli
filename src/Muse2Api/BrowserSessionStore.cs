@@ -21,14 +21,20 @@ public sealed class BrowserSessionStore(string dataDirectory)
         {
             var file = PathFor(account);
             if (!File.Exists(file)) return null;
-            var saved = JsonSerializer.Deserialize<SavedState>(File.ReadAllText(file));
+            var saved = JsonSerializer.Deserialize<SavedState>(PrivateDataProtection.ReadFile(file));
             if (saved is null || saved.AuthenticationHash != AuthenticationHash(account)) return null;
             using var state = JsonDocument.Parse(saved.StorageState);
-            return state.RootElement.ValueKind == JsonValueKind.Object
+            var valid = state.RootElement.ValueKind == JsonValueKind.Object
                 && state.RootElement.TryGetProperty("cookies", out var cookies) && cookies.ValueKind == JsonValueKind.Array
-                && state.RootElement.TryGetProperty("origins", out var origins) && origins.ValueKind == JsonValueKind.Array ? saved.StorageState : null;
+                && state.RootElement.TryGetProperty("origins", out var origins) && origins.ValueKind == JsonValueKind.Array;
+            if (!valid) return null;
+            PrivateDataProtection.MigrateLegacyFile(file);
+            return saved.StorageState;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { return null; }
+        // This is a cache: recover a context from the separately validated
+        // account cookies if its encrypted snapshot is damaged. Preserve the
+        // file; accounts/API-key stores still fail closed on decryption errors.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or FormatException or CryptographicException) { return null; }
     }
 
     public async Task SaveAsync(Account account, string storageState)
@@ -37,12 +43,7 @@ public sealed class BrowserSessionStore(string dataDirectory)
         if (parsed.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Invalid browser state");
         var file = PathFor(account);
         Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-        var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            await File.WriteAllTextAsync(temporary, JsonSerializer.Serialize(new SavedState(AuthenticationHash(account), storageState)));
-            File.Move(temporary, file, overwrite: true);
-        }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        await Task.Run(() => PrivateDataProtection.WriteFile(file,
+            JsonSerializer.Serialize(new SavedState(AuthenticationHash(account), storageState))));
     }
 }

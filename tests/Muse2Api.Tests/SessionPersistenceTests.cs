@@ -33,9 +33,23 @@ public class SessionPersistenceTests
         const string state = "{\"cookies\":[],\"origins\":[]}";
         await store.SaveAsync(account, state);
         Assert.Equal(state, new BrowserSessionStore(dir.Root).Load(account));
+        if (OperatingSystem.IsWindows())
+            Assert.DoesNotContain("AuthenticationHash", File.ReadAllText(Directory.GetFiles(Path.Combine(dir.Root, "browser-sessions"))[0]));
         Assert.Null(store.Load(new Account { Cookies = new(account.Cookies) }));
         account.Cookies["hatch_sess"] = "another-login"; Assert.Null(store.Load(account));
         Assert.Empty(Directory.GetFiles(Path.Combine(dir.Root, "browser-sessions"), "*.tmp"));
+    }
+
+    [Fact]
+    public async Task BrokenEncryptedBrowserCacheIsPreservedAndCanBeReplacedAfterRecovery()
+    {
+        if(!OperatingSystem.IsWindows())return;
+        using var dir=new TempDirectory();var account=new Account();var store=new BrowserSessionStore(dir.Root);
+        const string valid="{\"cookies\":[],\"origins\":[]}";await store.SaveAsync(account,valid);
+        var file=Assert.Single(Directory.GetFiles(Path.Combine(dir.Root,"browser-sessions"),"*.json"));
+        foreach(var corrupt in new[]{"muse-dpapi-v1:AQID","muse-dpapi-v1:not-base64"})
+        {File.WriteAllText(file,corrupt);Assert.Null(store.Load(account));Assert.Equal(corrupt,File.ReadAllText(file));}
+        await store.SaveAsync(account,valid);Assert.Equal(valid,store.Load(account));
     }
 
     [BrowserFact]

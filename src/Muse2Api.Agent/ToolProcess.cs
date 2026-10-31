@@ -112,6 +112,8 @@ public sealed partial class ToolExecutor
         };
         foreach (var argument in args) start.ArgumentList.Add(argument);
         if (encoding is not null) { start.StandardOutputEncoding = encoding; start.StandardErrorEncoding = encoding; }
+        // Windows PowerShell/CMD explicitly use UTF-8; match that encoding for redirected stdin.
+        if (input) start.StandardInputEncoding = new UTF8Encoding(false);
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
         start.Environment["GIT_PAGER"] = "cat";
         start.Environment["GIT_OPTIONAL_LOCKS"] = "0";

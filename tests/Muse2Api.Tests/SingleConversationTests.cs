@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json.Nodes;
 using Microsoft.Playwright;
+using Muse2Api.Agent;
 
 namespace Muse2Api.Tests;
 
@@ -215,6 +216,38 @@ public class SingleConversationTests
     }
 
     [BrowserFact]
+    public async Task SecondReadDoesNotReplayFirstToolCallWhileHistoryHydrates()
+    {
+        using var dir=new TempDirectory(); File.WriteAllText(dir.File("first.txt"),"FIRST_FILE");File.WriteAllText(dir.File("second.txt"),"SECOND_FILE");
+        var fixture=new WebFixture
+        {
+            Responses=new[]{"{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"first.txt\"}}]}","{\"tool_calls\":[{\"name\":\"read_file\",\"arguments\":{\"path\":\"second.txt\"}}]}","{\"status\":\"done\",\"summary\":\"Đã đọc cả hai tệp.\"}"},
+            Script="""
+              const render=bubble;let replies=0,first='';bubble=text=>{
+                if(++replies===1){first=text;render(text);return;}
+                if(replies===2){render(first);const old=messages.lastChild;const latestUser=[...messages.querySelectorAll('.ms-auto')].at(-1);messages.insertBefore(old,latestUser);setTimeout(()=>render(text),1600);return;}
+                render(text);
+              };
+              """,
+        };
+        var account=Account();var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try
+        {
+            await fixture.Install(driver,account);var events=new List<AgentEvent>();
+            var loop=new AgentLoop(new ToolExecutor(dir.Root),async(messages,token)=>
+            {
+                var reply=await Reply(driver,account,messages.Select(m=>(m["role"]!.ToString(),m["content"]!.ToString())).ToList());
+                var calls=ToolCallParser.Parse(reply);return(calls.Count==0?ToolCallParser.PlannerReply(reply):reply,calls);
+            },(_,_)=>Task.FromResult(true),events.Add);
+            Assert.True(await loop.RunAsync("Đọc hai tệp first.txt và second.txt"));
+            Assert.Equal(new[]{"first.txt","second.txt"},events.Where(e=>e.Kind=="tool_start").Select(e=>e.Path).ToArray());
+            Assert.Contains(events,e=>e.Kind=="tool_result"&&e.Text.Contains("SECOND_FILE"));
+            Assert.Equal(3,fixture.Submissions);Assert.Equal(1,fixture.NewThreads);
+        }
+        finally {await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
     public async Task IdenticalReplyInReplacedBranchIsNewButRerenderedOldReplyIsNot()
     {
         using var dir=new TempDirectory();var account=Account();
@@ -222,7 +255,7 @@ public class SingleConversationTests
             let turn=0; const send=document.querySelector('button').onclick;
             document.querySelector('button').onclick=async()=>{
               if(++turn<=2){messages.replaceChildren();const user=document.createElement('div');user.className='group/msg ms-auto items-end';user.textContent='APP_STATE observation '+turn;messages.append(user);}
-              else {messages.querySelectorAll('.hatch-agent-bubble-bg').forEach(e=>e.remove());const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);setTimeout(()=>stop.remove(),700);}
+              else {const submitted=box.value;box.value='';const r=await fetch('/api/chat',{method:'POST'});bubble(await r.text());userBubble(submitted);const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);setTimeout(()=>stop.remove(),700);return;}
               await send();
             };
             """ };
@@ -306,6 +339,7 @@ public class SingleConversationTests
     {
         public int NewThreads, Submissions, Uploads; public bool RateLimited, RateNotice, SavedUnavailable;
         public string Script = "";
+        public string[]? Responses;
         public async Task Install(BrowserDriver driver, Account account)
         {
             var method = typeof(BrowserDriver).GetMethod("GetContext", BindingFlags.NonPublic | BindingFlags.Instance)!;
@@ -317,7 +351,7 @@ public class SingleConversationTests
                 if (path == "/api/chat")
                 {
                     Submissions++;
-                    await route.FulfillAsync(new() { Status = RateLimited ? 429 : 200, ContentType = "text/plain", Body = RateNotice ? "RATE_NOTICE" : "{\"status\":\"done\",\"summary\":\"fixture done\"}" }); return;
+                    await route.FulfillAsync(new() { Status = RateLimited ? 429 : 200, ContentType = "text/plain", Body = RateNotice ? "RATE_NOTICE" : Responses is {Length:>0} ? Responses[Math.Min(Submissions-1,Responses.Length-1)] : "{\"status\":\"done\",\"summary\":\"fixture done\"}" }); return;
                 }
                 if (path == "/thread/new") NewThreads++;
                 if (SavedUnavailable && path.StartsWith("/thread/") && path != "/thread/new")
@@ -327,15 +361,16 @@ public class SingleConversationTests
                     <script>
                     const box=document.querySelector('textarea'), messages=document.querySelector('#messages');
                     document.querySelector('input[type=file]').onchange=()=>fetch('/api/attachment',{method:'POST',body:'fixture image upload'});
-                    function bubble(text){const b=document.createElement('div');b.className='hatch-agent-bubble-bg';const pre=document.createElement('pre'),code=document.createElement('code');code.className='language-json';code.textContent=text;pre.append(code);b.append(pre);messages.append(b);}
-                    const saved=JSON.parse(localStorage.getItem(location.pathname)||'[]'); saved.forEach(bubble);
+                    function userBubble(text){const u=document.createElement('div');u.className='group/msg ms-auto items-end';u.textContent=text;messages.append(u);}
+                    function bubble(text){const g=document.createElement('div');g.className='group/msg justify-start';const b=document.createElement('div');b.className='hatch-agent-bubble-bg';const pre=document.createElement('pre'),code=document.createElement('code');code.className='language-json';code.textContent=text;pre.append(code);b.append(pre);g.append(b);messages.append(g);}
+                    const saved=JSON.parse(localStorage.getItem(location.pathname)||'[]'); saved.forEach(item=>{userBubble(item.user);bubble(item.text);});
                     document.querySelector('button').onclick=async()=>{
                       if(location.pathname==='/thread/new') history.replaceState({},'', '/thread/fixture-1');
-                      box.value=''; const response=await fetch('/api/chat',{method:'POST'});
+                      const submitted=box.value;userBubble(submitted);box.value=''; const response=await fetch('/api/chat',{method:'POST'});
                       if(!response.ok)return; const text=await response.text();
                       if(text==='RATE_NOTICE'){const alert=document.createElement('div');alert.setAttribute('role','alert');alert.textContent='Too many requests. Rate limit exceeded.';document.body.append(alert);return;}
                       bubble(text);
-                      const values=JSON.parse(localStorage.getItem(location.pathname)||'[]');values.push(text);localStorage.setItem(location.pathname,JSON.stringify(values));
+                      const values=JSON.parse(localStorage.getItem(location.pathname)||'[]');values.push({user:submitted,text});localStorage.setItem(location.pathname,JSON.stringify(values));
                     };
                     </script></body></html>
                     """ + "<script>" + Script + "</script>" });

@@ -95,7 +95,7 @@ public sealed class AgentLoop
                 });
                 var (text, calls) = await _chat(request, cancel);
                 cancel.ThrowIfCancellationRequested();
-                calls = calls.Select(ToolCallParser.Normalize).ToList();
+                calls = calls.Select(ToolCallParser.Validate).ToList();
                 messages.Add(new() { ["role"] = "assistant", ["content"] = text });
                 if (calls.Any(call => call.Name == "__parse_error__"))
                 {

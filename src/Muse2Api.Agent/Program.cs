@@ -24,13 +24,13 @@ if (opts.Help)
 
         Tùy chọn: --base-url URL --api-key KEY --model NAME
                   --workspace DIR --shell powershell|cmd|bash|auto
-                  --yes (không hỏi xác nhận trước khi ghi file / chạy lệnh)
+                  --yes (tự duyệt sửa file thường; lệnh và file nhạy cảm vẫn hỏi)
                   --max-steps N (tùy chọn; mặc định không giới hạn số bước)
 
         Lệnh trong REPL: /help /exit /clear /model <tên> /workspace <đường dẫn>
                          /yes (bật/tắt tự xác nhận)
         Agent chỉ được đọc/ghi file trong workspace, và chỉ chạy lệnh sau khi
-        bạn xác nhận (trừ khi dùng --yes).
+        bạn xác nhận. --yes vẫn yêu cầu duyệt lệnh shell và file nhạy cảm.
         """);
     return 0;
 }
@@ -102,8 +102,9 @@ async Task<bool> RunTaskAsync(string prompt)
         messages => client.ChatAsync(messages),
         call =>
         {
-            if (autoApprove) return true;
-            Console.Write("  Chạy bước này? [y/N] ");
+            if (autoApprove && !TurboApprovalPolicy.RequiresExplicitApproval(call)) return true;
+            Console.WriteLine("  Yêu cầu duyệt: " + tools.Describe(call));
+            Console.Write("  Cho phép thao tác này? [y/N] ");
             return Console.ReadLine()?.Trim().ToLowerInvariant() is ("y" or "yes");
         },
         Console.WriteLine,

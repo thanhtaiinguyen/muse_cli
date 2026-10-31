@@ -84,6 +84,27 @@ public class StoreRegressionTests
     }
 
     [Fact]
+    public void AccountPool_ProtectsCredentialsAndMigratesLegacyPlaintext()
+    {
+        using var dir = new TempDirectory();
+        var path = dir.File("accounts.json");
+        const string originalCookie = "sensitive-cookie-test-fixture";
+        var legacy = new List<Account> { new() { Id = "a", Cookies = new() { ["hatch_sess"] = originalCookie } } };
+        File.WriteAllText(path, JsonSerializer.Serialize(legacy));
+        var pool = new AccountPool(path);
+        pool.Load();
+        Assert.Equal(originalCookie, pool.Get("a")!.Cookies["hatch_sess"]);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.DoesNotContain(originalCookie, File.ReadAllText(path));
+            Assert.True(PrivateDataProtection.IsEncrypted(File.ReadAllText(path)));
+        }
+        var again = new AccountPool(path);
+        again.Load();
+        Assert.Equal(originalCookie, again.Get("a")!.Cookies["hatch_sess"]);
+    }
+
+    [Fact]
     public async Task AccountPool_WaitsForLeaseAndHonorsCancellation()
     {
         using var dir = new TempDirectory();

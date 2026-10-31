@@ -102,8 +102,9 @@ public sealed class AccountPool
         if (!File.Exists(_file)) return;
         try
         {
-            var list = JsonSerializer.Deserialize<List<Account>>(File.ReadAllText(_file)) ?? new();
+            var list = JsonSerializer.Deserialize<List<Account>>(PrivateDataProtection.ReadFile(_file)) ?? new();
             lock (_lock) { foreach (var a in list) _accounts[a.Id] = a; }
+            PrivateDataProtection.MigrateLegacyFile(_file);
         }
         catch (Exception ex) { throw new InvalidOperationException($"Cannot load account store '{_file}'; existing data was preserved.", ex); }
     }
@@ -113,10 +114,8 @@ public sealed class AccountPool
         lock (_lock)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_file)) ?? ".");
-            var tmp = _file + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(_accounts.Values.ToList(),
+            PrivateDataProtection.WriteFile(_file, JsonSerializer.Serialize(_accounts.Values.ToList(),
                 new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(tmp, _file, overwrite: true);
         }
     }
 

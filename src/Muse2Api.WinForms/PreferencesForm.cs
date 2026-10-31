@@ -43,7 +43,7 @@ internal sealed class PreferencesForm : Form
         account.Click += (_, _) => LoginRequested?.Invoke(this, EventArgs.Empty); Add(account, 20);
         _readOnly = new CheckBox { Text = "Chỉ tìm hiểu dự án — không sửa tệp hoặc chạy lệnh", AutoSize = true, Checked = readOnly, Enabled = !busy, ForeColor = DesktopTheme.Text };
         Add(_readOnly);
-        _turbo = new CheckBox { Text = "Turbo — tự chạy mọi thao tác, không hỏi trước; trả lời bằng tiếng Việt", AutoSize = true, Checked = turbo, Enabled = !busy, ForeColor = DesktopTheme.Text };
+        _turbo = new CheckBox { Text = "Turbo — tự sửa file thường, hỏi trước khi chạy lệnh; tiếng Việt", AutoSize = true, Checked = turbo, Enabled = !busy, ForeColor = DesktopTheme.Text };
         Add(_turbo);
         _turbo.CheckedChanged += (_, _) => { if (_turbo.Checked) _readOnly.Checked = false; };
         _readOnly.CheckedChanged += (_, _) => { if (_readOnly.Checked) _turbo.Checked = false; };

@@ -32,6 +32,14 @@ public static class ToolCallParser
         return new(name, args);
     }
 
+    public static ToolCall Validate(ToolCall call)
+    {
+        if (call.Name == "__parse_error__") return call;
+        var normalized = Normalize(call);
+        return Names.Contains(normalized.Name) ? normalized
+            : ParseError("Unknown local tool: " + normalized.Name + ". No actions were executed.");
+    }
+
     public static List<ToolCall> Parse(string text)
     {
         var calls = new List<ToolCall>();
@@ -43,7 +51,7 @@ public static class ToolCallParser
             try { Extract(JsonNode.Parse(body), calls, explicitTool: language == "tool"); }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
             {
-                if (language == "tool" || body.Contains("\"tool_calls\"", StringComparison.Ordinal) || body.Contains("\"actions\"", StringComparison.Ordinal)) calls.Add(JsonError(ex));
+                if (language == "tool" || LooksLikePlan(body)) calls.Add(JsonError(ex));
             }
         }
         if (calls.Count > 0) return Validated(calls);
@@ -52,7 +60,7 @@ public static class ToolCallParser
         {
             try { Extract(JsonNode.Parse(raw), calls, explicitTool: false); }
             catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException)
-            { if (raw.Contains("\"tool_calls\"", StringComparison.Ordinal) || raw.Contains("\"actions\"", StringComparison.Ordinal)) calls.Add(JsonError(ex)); }
+            { if (LooksLikePlan(raw)) calls.Add(JsonError(ex)); }
         }
         if (calls.Count == 0 && Regex.IsMatch(text, @"(?m)^\s*```tool\s*$")) calls.Add(ParseError("Incomplete local tool block"));
         return Validated(calls);
@@ -62,6 +70,11 @@ public static class ToolCallParser
     // is not permission to execute part of a malformed batch.
     private static List<ToolCall> Validated(List<ToolCall> calls)
         => calls.Any(c => c.Name == "__parse_error__") ? calls.Where(c => c.Name == "__parse_error__").ToList() : calls;
+
+    private static bool LooksLikePlan(string text)
+        => text.Contains("\"tool_calls\"", StringComparison.Ordinal) || text.Contains("\"actions\"", StringComparison.Ordinal)
+            || Regex.IsMatch(text, "\"(?:name|tool)\"\\s*:\\s*\"(?:" + string.Join('|', Names.Concat(Aliases.Keys).Select(Regex.Escape)) + ")\"", RegexOptions.IgnoreCase)
+            || text.Contains("\"arguments\"", StringComparison.Ordinal) && Regex.IsMatch(text, "\"(?:name|tool|function)\"\\s*:");
 
     private static ToolCall JsonError(Exception ex) => ParseError(
         "Invalid local plan JSON: " + ex.Message + " No actions from this response were executed. "
@@ -93,6 +106,11 @@ public static class ToolCallParser
             return;
         }
         if (node is not JsonObject obj) { if (explicitTool) calls.Add(ParseError("Tool must be a JSON object")); return; }
+        if (obj.ContainsKey("actions") && obj.ContainsKey("tool_calls"))
+        { calls.Add(ParseError("Use one actions or tool_calls envelope, not both. No actions were executed.")); return; }
+        if (obj.ContainsKey("actions") && obj["actions"] is not JsonArray
+            || obj.ContainsKey("tool_calls") && obj["tool_calls"] is not JsonArray)
+        { calls.Add(ParseError("actions/tool_calls must be JSON arrays. No actions were executed.")); return; }
         if (obj["actions"] is JsonArray plan)
         {
             foreach (var item in plan)
@@ -126,13 +144,16 @@ public static class ToolCallParser
         if (arguments is JsonValue value && value.TryGetValue<string>(out var encoded))
             args = JsonNode.Parse(encoded) as JsonObject ?? throw new InvalidOperationException("Tool arguments must be an object");
         else if (arguments is JsonObject map) args = (JsonObject)map.DeepClone();
+        else if (arguments is not null || obj.ContainsKey("arguments") || obj.ContainsKey("parameters") || function?.ContainsKey("arguments") == true)
+        { calls.Add(ParseError("Tool arguments must be a JSON object or an encoded JSON object. No actions were executed.")); return; }
         else
         {
             args = (JsonObject)obj.DeepClone();
             args.Remove("name"); args.Remove("tool"); args.Remove("id");
         }
         var call = Normalize(new(name, args));
-        if (explicitTool || Names.Contains(call.Name)) calls.Add(call);
+        if (!Names.Contains(call.Name) && (explicitTool || arguments is not null || function is not null)) calls.Add(Validate(call));
+        else if (explicitTool || Names.Contains(call.Name)) calls.Add(call);
     }
 
     public static string StripToolBlocks(string text)

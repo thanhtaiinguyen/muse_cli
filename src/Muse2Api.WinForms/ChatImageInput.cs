@@ -1,9 +1,11 @@
+using System.ComponentModel;
 using System.Drawing.Imaging;
 
 namespace Muse2Api.WinForms;
 
 internal sealed class ChatInputBox : TextBox
 {
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Func<bool>? PasteImage { get; set; }
     protected override bool ProcessCmdKey(ref Message message, Keys keyData)
     {

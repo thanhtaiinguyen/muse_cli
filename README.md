@@ -4,7 +4,8 @@
 
 ## Mở ứng dụng
 
-Mở **`dist\Muse\Muse.exe`** sau khi publish thành công. Phiên bản mã nguồn hiện tại là **0.8.5**; bản đã đóng gói kèm runtime nên không cần cài SDK hay mở terminal.
+Mở **`dist\Muse\Muse.exe`** sau khi publish thành công. Phiên bản mã nguồn hiện tại là **0.8.7 (bản tích hợp .NET 10)**; bản đã đóng gói kèm runtime nên không cần cài SDK hay mở terminal.
+Người dùng đã kiểm tra tay và xác nhận bản tích hợp hoạt động OK ngày 31/10/2026. Bản đóng gói tại máy hiện vẫn dùng `-Preview` và hồ sơ thử riêng; việc xác nhận không tự chuyển đổi hồ sơ chính. Xem [hướng dẫn kiểm tra tay](MANUAL_TESTING_NET10.md).
 Nếu đang mở bản cũ, đóng cửa sổ cũ trước khi mở bản mới.
 
 Ngay trong ứng dụng:
@@ -46,6 +47,20 @@ Dữ liệu cá nhân được lưu dưới `%LOCALAPPDATA%\Muse2Api.WinForms`.
 Ứng dụng dùng gateway riêng trên địa chỉ loopback với cổng tự chọn, không thay
 đổi hoặc dừng gateway khác đang mở trên máy. Lệnh shell được duyệt sẽ chạy với
 quyền người dùng; chúng không bị sandbox theo thư mục.
+
+## Kiểm thử branch .NET 10
+
+Bản tích hợp 0.8.7 dùng .NET 10 và Microsoft.Playwright 1.64.1.
+Hãy đọc [UPGRADE_TESTING.md](UPGRADE_TESTING.md) trước khi chạy: tài liệu
+hướng dẫn pull branch, build/test, tạo profile Muse riêng và rollback về 0.8.5.
+
+Trên Windows, gateway mã hóa API key, account và browser session bằng
+DPAPI CurrentUser. Dùng `MUSE_DESKTOP_PROFILE_ROOT` để test riêng, không
+làm đổi cookie hoặc lịch sử của bản cũ. Trên Linux, DPAPI không hoạt động.
+
+**Turbo không tự duyệt lệnh shell hoặc file cấu hình nhạy cảm.**
+Xem [SECURITY.md](SECURITY.md) và [COMMERCIAL-LICENSING.md](COMMERCIAL-LICENSING.md).
+Bản 0.8.7 đã được người dùng kiểm tra tay và xác nhận OK; hồ sơ gốc vẫn được giữ nguyên. Không có giấy phép thương mại mới được cấp bởi bản cập nhật này.
 
 ## Dành cho người phát triển
 

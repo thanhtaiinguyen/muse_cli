@@ -38,7 +38,9 @@ public static class Dom
         })()
         """;
 
-    public static readonly string ChatState = $$"""
+    public static readonly string ChatState = ReadChatState();
+
+    public static string ReadChatState(string? localRequestId = null) => $$"""
         (() => {
           const visible = e => e.getClientRects().length > 0
             && !e.closest('[hidden],[aria-hidden="true"],[inert]')
@@ -81,6 +83,15 @@ public static class Dom
           for (let i=0;i<userText.length;i++) fingerprint = Math.imul(fingerprint ^ userText.charCodeAt(i), 16777619);
           const userKey = user ? userText.length + ':' + (fingerprint >>> 0) : '';
           const replyAfterUser = !!(user && agent && (user.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING));
+          const requestId = {{Q(localRequestId ?? "")}};
+          const owner = requestId ? users.find(e => (e.textContent || '').includes('MUSE_LOCAL_REQUEST_ID: ' + requestId)) : null;
+          const follows = (a,b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+          // Never bind a historical assistant node to a new local submission,
+          // even when hydration/reordering changes its text or bubble count.
+          const localReplies = owner ? bubbles.filter(b => follows(owner,b)
+            && !users.some(u => u !== owner && follows(owner,u) && follows(u,b))) : [];
+          const localReply = localReplies.length ? localReplies[localReplies.length-1] : null;
+          const localReplyText = localReply ? replyText(localReply).trim() : '';
           const atts = [...document.querySelectorAll({{Q(Attachment)}})].map(a => {
             const v = a.querySelector('video'), i = a.querySelector('img');
             const m = v || i;
@@ -100,6 +111,7 @@ public static class Dom
           const error = [...document.querySelectorAll('[role="alert"]')].filter(visible)
             .map(e => e.innerText || '').find(t => /something went wrong|failed to (?:send|generate)|connection (?:lost|failed)|network error|đã xảy ra lỗi/i.test(t)) || '';
           return { agentCount: bubbles.length, lastText: last, replyKey: nodeId(agent), replyKeys: bubbles.map(nodeId), userKey, replyAfterUser, rateLimited, error,
+                    localRequestId: requestId, localReplyBound: !!localReply, localReplyText,
                     generating,
                     approval: [...document.querySelectorAll({{Q(ApprovalCard)}})].some(visible),
                     attachments: atts, tail };
