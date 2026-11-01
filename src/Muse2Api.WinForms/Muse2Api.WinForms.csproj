@@ -9,10 +9,11 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <AssemblyName>Muse</AssemblyName>
     <Product>Muse Workspace</Product>
-    <Version>0.8.7</Version>
+    <Version>0.9.1</Version>
     <RootNamespace>Muse2Api.WinForms</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <None Include="../../GOAL.md" Link="GOAL.md" CopyToPublishDirectory="PreserveNewest" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
     <ProjectReference Include="..\Muse2Api.Agent\Muse2Api.Agent.csproj" />
     <ProjectReference Include="..\Muse2Api\Muse2Api.csproj" />

@@ -13,7 +13,13 @@ public sealed class AgentLoop
     private readonly Action<AgentEvent> _observe;
     private readonly int? _maxSteps;
     private int _running;
+    private AgentEvent? _turnOutcome;
     public List<JsonObject> History { get; } = new();
+    public JsonArray? RetrievedContext { get; set; }
+    public GoalRun? Goal { get; set; }
+    /// <summary>Directory of user-installed skills. When the prompt mentions
+    /// a skill with @alias, its content is added to this turn's instructions.</summary>
+    public string? SkillsDirectory { get; set; }
 
     public AgentLoop(ToolExecutor tools, Func<List<JsonObject>, Task<(string, List<ToolCall>)>> chat,
         Func<ToolCall, bool> confirm, Action<string> output, int? maxSteps = null)
@@ -26,7 +32,12 @@ public sealed class AgentLoop
         Func<ToolApproval, CancellationToken, Task<bool>> confirm, Action<AgentEvent> observe, int? maxSteps = null)
     {
         if (maxSteps is < 1) throw new ArgumentOutOfRangeException(nameof(maxSteps));
-        _tools = tools; _chat = chat; _confirm = confirm; _observe = observe; _maxSteps = maxSteps;
+        _tools = tools; _chat = chat; _confirm = confirm; _maxSteps = maxSteps;
+        _observe = item =>
+        {
+            if (item.Kind is "completed" or "incomplete" or "cancelled" or "declined" or "waiting_input") _turnOutcome = item;
+            observe(item);
+        };
     }
 
     public async Task<bool> RunAsync(string prompt, CancellationToken cancel = default, List<string>? images = null)
@@ -34,13 +45,55 @@ public sealed class AgentLoop
         if (string.IsNullOrWhiteSpace(prompt) && images is not { Count: > 0 }) throw new ArgumentException("Nội dung không được để trống.");
         if (prompt.Length > 32000) throw new ArgumentException("Yêu cầu quá dài (tối đa 32000 ký tự).");
         if (Interlocked.CompareExchange(ref _running, 1, 0) != 0) throw new InvalidOperationException("Agent is already running");
+        _turnOutcome = null;
         _tools.BeginAgentTurn();
         var messages = new List<JsonObject>();
         string? pendingTool = null;
+        GoalVerification? verification = null;
+        var userPrompt = prompt;
         try
         {
+            var goalFollowUp = Goal?.AcceptsFollowUp(prompt) == true;
+            if (GoalRun.IsCommand(prompt) || goalFollowUp)
+            {
+                var argument = goalFollowUp ? "" : prompt[5..].Trim();
+                if (argument.Equals("status", StringComparison.OrdinalIgnoreCase))
+                {
+                    _observe(new("assistant", Goal is null ? "Chưa có goal. Nhập /goal kèm mục tiêu để bắt đầu." : $"Mục tiêu: {Goal.Objective}\nTrạng thái: {GoalRun.DescribeStatus(Goal.Status)}\n{Goal.Summary}"));
+                    _observe(new("completed", "Đã xem trạng thái goal.")); return true;
+                }
+                if (argument.Equals("stop", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (Goal is not null) { Goal.Status = "paused"; Goal.PendingQuestion = null; Goal.Summary = "Đã tạm dừng. Nhập /goal để tiếp tục và kiểm chứng lại."; Goal.UpdatedAt = DateTimeOffset.UtcNow; }
+                    _observe(new("assistant", "Đã tạm dừng goal. Mục tiêu và thay đổi được giữ lại."));
+                    _observe(new("completed", "Đã tạm dừng goal.")); return true;
+                }
+                if (argument.Length > 0) Goal = new() { Objective = argument };
+                if (Goal is null || string.IsNullOrWhiteSpace(Goal.Objective))
+                {
+                    _observe(new("assistant", "Nhập /goal kèm mục tiêu, ví dụ: /goal Hoàn thiện màn hình đăng nhập và kiểm thử toàn bộ luồng."));
+                    _observe(new("waiting_input", "Cần mục tiêu để bắt đầu.")); return false;
+                }
+                if (goalFollowUp && !WorkflowPolicy.IsContinue(userPrompt)) Goal.AddFollowUp(userPrompt);
+                Goal.Status = "running"; Goal.Summary = "Đang xây dựng và kiểm chứng mục tiêu.";
+                Goal.PendingQuestion = null;
+                verification = new();
+                prompt = Goal.TaskPrompt;
+                _observe(new("goal", "Đang theo đuổi mục tiêu: " + prompt));
+            }
             var context = await _tools.WorkspaceContextAsync(cancel);
-            messages.Add(new() { ["role"] = "system", ["content"] = AgentClient.SystemPrompt + "\n\n" + context + "\n\nCURRENT LOCAL TASK (keep working on this):\n" + prompt });
+            var skillBlock = "";
+            if (SkillsDirectory is not null)
+            {
+                try
+                {
+                    skillBlock = new SkillStore(SkillsDirectory).Expand(prompt, out var appliedSkills);
+                    if (appliedSkills.Count > 0) _observe(new("skill", "Đang áp dụng kỹ năng: " + string.Join(", ", appliedSkills.Select(a => "@" + a))));
+                }
+                catch (Exception ex) { _observe(new("skill", "Không nạp được kỹ năng: " + ex.Message)); }
+            }
+            messages.Add(new() { ["role"] = "system", ["content"] = AgentClient.SystemPrompt + "\n\n" + context + (skillBlock.Length == 0 ? "" : "\n\n" + skillBlock) + "\n\nCURRENT LOCAL TASK (keep working on this):\n" + prompt
+                + (verification is null ? "" : "\n\n" + GoalRun.Instructions) });
             messages.AddRange(History.Select(m =>
             {
                 var copy = (JsonObject)m.DeepClone();
@@ -54,21 +107,23 @@ public sealed class AgentLoop
                 }
                 return copy;
             }));
-            JsonNode userMessageContent = JsonValue.Create(prompt)!;
+            JsonNode userMessageContent = JsonValue.Create(userPrompt)!;
             if (images is { Count: > 0 })
             {
                 var imageBatch = Guid.NewGuid().ToString("N");
                 var parts = new JsonArray();
-                parts.Add(new JsonObject { ["type"] = "text", ["text"] = prompt });
+                parts.Add(new JsonObject { ["type"] = "text", ["text"] = userPrompt });
                 foreach (var url in images) parts.Add(new JsonObject { ["type"] = "image_url", ["attachment_id"] = imageBatch, ["image_url"] = new JsonObject { ["url"] = url } });
                 userMessageContent = parts;
             }
             messages.Add(new() { ["role"] = "user", ["content"] = userMessageContent });
             var failures = new Dictionary<string, int>();
             var required = LocalTaskIntent.Required(prompt);
+            if (verification is not null) required |= LocalWork.Read | LocalWork.CommandVerified | LocalWork.ComputerInteract | LocalWork.ComputerAssert | LocalWork.ComputerScreenshot;
             var evidence = LocalWork.None;
             var protocolRetries = 0;
             var malformedReplies = 0;
+            var scopeRetries = 0;
             var declined = false;
             var verifiedNoChange = false;
             string? previousObservation = null;
@@ -76,21 +131,31 @@ public sealed class AgentLoop
             for (long step = 0; !_maxSteps.HasValue || step < _maxSteps.Value; step++)
             {
                 cancel.ThrowIfCancellationRequested();
-                // Long tasks keep a bounded local transcript as well as a
-                // bounded request. The current goal remains in the system turn.
-                if (messages.Count > 201) messages.RemoveRange(1, messages.Count - 201);
+                // Summarize before evicting raw history; retain that memory in
+                // the session and attach it to EVERY existing web request.
+                if (ConversationContext.Compact(messages, _tools.Root, protectedPrefix: 1))
+                    _observe(new("context_compacted", "Đã nén ngữ cảnh cũ trên máy; giữ mục tiêu, lời dặn và kết quả gần đây. Không tạo thêm lượt chat web."));
                 _observe(new("assistant_start", "Đang suy nghĩ…"));
                 var request = FitContext(messages);
-                // This is a live desktop request, not a request to discuss a
-                // pasted transcript. Keep the next action explicit after file data.
+                // Requirements apply to this user turn only. A discussion after
+                // a coding task must not inherit the earlier task's operations.
                 request.Add(new()
                 {
                     ["role"] = "user",
                     ["content"] = "APP_STATE:\n" + new JsonObject
                     {
                         ["goal"] = prompt, ["workspace"] = _tools.Root, ["observed_operations"] = evidence.ToString(),
+                        ["conversation_context"] = ConversationContext.Snapshot(messages.Skip(1), _tools.Root),
+                        ["retrieved_context"] = RetrievedContext?.DeepClone(),
+                        ["active_skills"] = skillBlock.Length == 0 ? null : JsonValue.Create(skillBlock),
+                        ["goal_session"] = Goal is null ? null : new JsonObject { ["objective"] = Goal.Objective,
+                            ["status"] = Goal.Status, ["pending_question"] = Goal.PendingQuestion },
+                        ["goal_mode"] = verification is null ? null : new JsonObject { ["objective"] = Goal!.Objective,
+                            ["instructions"] = GoalRun.Instructions, ["verification"] = verification.Snapshot() },
                         ["remaining"] = (required & ~evidence).ToString(), ["computer_scope"] = _tools.Computer?.Context ?? "unavailable",
-                        ["next"] = "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.",
+                        ["next"] = required == LocalWork.None
+                            ? "Respond to the current user message in Vietnamese. For discussion, advice or a comment, return status done with the actual answer in summary and no actions. Resolve references such as continue using conversation_context, but only propose actions requested by the current user; do not execute historical tasks for a casual comment. Do not claim unobserved execution."
+                            : "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.",
                     }.ToJsonString(),
                 });
                 var (text, calls) = await _chat(request, cancel);
@@ -121,14 +186,39 @@ public sealed class AgentLoop
                     continue;
                 }
                 malformedReplies = 0;
-                var visible = ToolCallParser.StripToolBlocks(text);
+                if (calls.Count > 0 && (verification is null && Goal?.Status == "completed" && WorkflowPolicy.IsContinue(userPrompt)
+                    || calls.Any(call => !WorkflowPolicy.Allows(prompt, call, verification is not null))))
+                {
+                    messages[^1]["content"] = "[Unverified reply: action batch exceeded the current user's request.]";
+                    _observe(new("protocol_retry", "Đã bỏ qua thao tác không thuộc yêu cầu hiện tại. Đang điều chỉnh phản hồi…"));
+                    if (++scopeRetries >= 2)
+                    { _observe(new("incomplete", "Muse đề xuất thao tác ngoài yêu cầu nên app đã chặn toàn bộ, chưa thay đổi dự án. Hãy gửi lại yêu cầu rõ hơn.")); return false; }
+                    messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: The entire action batch was rejected BEFORE execution. This turn is discussion/advice or explicitly read-only. Respect the current user request; return an answer in summary, or read-only file inspection when requested. Do not run commands, edit files or control the screen. Do not resume historical work." });
+                    continue;
+                }
+                var visible = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(text));
+                var needsInput = ToolCallParser.NeedsInput(text);
+                if (verification is not null && WorkflowPolicy.IsPermissionQuestion(visible)) needsInput = false;
                 if (calls.Count == 0)
                 {
+                    if (verification is not null && verification.Missing.Count > 0 && !needsInput)
+                    {
+                        messages[^1]["content"] = "[Unverified reply: goal checks are still missing.]\n" + text;
+                        if (protocolRetries++ >= 2)
+                        {
+                            _observe(new("incomplete", "Goal chưa hoàn tất. " + string.Join("; ", verification.Missing)
+                                + ". Mục tiêu đã được lưu; nhập /goal để tiếp tục.")); return false;
+                        }
+                        _observe(new("protocol_retry", "Đang tiếp tục kiểm chứng goal…"));
+                        messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Goal completion rejected. Missing verified checks: "
+                            + string.Join("; ", verification.Missing) + ". Continue implementing/testing/fixing using local actions. If genuinely blocked, ask a concrete question and pause. " + GoalRun.Instructions });
+                        continue;
+                    }
                     if (string.IsNullOrWhiteSpace(text)) throw new InvalidOperationException("Model trả về câu trả lời rỗng.");
                     var missing = required & ~evidence;
-                    if (missing == LocalWork.Edit && verifiedNoChange && LocalTaskIntent.ExplainsNoChange(text)) missing = LocalWork.None;
-                    if (!declined && (missing != LocalWork.None && !LocalTaskIntent.IsClarification(text)
-                        || required != LocalWork.None && LocalTaskIntent.IsEnvironmentConfusion(text)))
+                    if (missing == LocalWork.Edit && verifiedNoChange && LocalTaskIntent.ExplainsNoChange(visible)) missing = LocalWork.None;
+                    if (!declined && (missing != LocalWork.None && !needsInput
+                        || required != LocalWork.None && LocalTaskIntent.IsEnvironmentConfusion(visible)))
                     {
                         messages[^1]["content"] = "[Unverified reply: the required local operations did not run.]\n" + text;
                         _observe(new("assistant", ""));
@@ -147,12 +237,17 @@ public sealed class AgentLoop
                                     : (missing & (LocalWork.Command | LocalWork.CommandVerified)) != 0 ? "Emit run_command for the required check, or process_status until an already started check exits successfully. "
                                     : (missing & LocalTaskIntent.ComputerWork) != 0 ? "Complete the remaining UI operations: enter the requested text, invoke/click the requested button, then computer_assert the requested resulting label/value. An inspect or input alone does not complete a UI test. Inspect again if element IDs expired. "
                                     : "Emit read_file/list_files to inspect the actual project, or summarize verified receipts if all requested work is already done. ")
-                                + $"Use a JSON code block with tool_calls and name/arguments. Wait for the external local result. Current task: {prompt}",
+                                + $"Use a JSON code block with actions in the application schema. Wait for the external local result. Current task: {prompt}",
                         });
                         continue;
                     }
-                    _observe(new("assistant", visible));
-                    if (LocalTaskIntent.IsClarification(text)) { _observe(new("waiting_input", "Muse cần thêm thông tin. Bạn có thể trả lời ngay trong ô chat.")); return false; }
+                    _observe(new("assistant", verification is null || needsInput ? visible
+                        : visible + "\n\nGoal đã được kiểm chứng bằng test tự động và thao tác/xác nhận/ảnh giao diện.\n" + verification.LastTestSummary));
+                    if (needsInput)
+                    {
+                        if (verification is not null && Goal is not null) Goal.PendingQuestion = visible[..Math.Min(2000, visible.Length)];
+                        _observe(new("waiting_input", "Muse cần thêm thông tin. Bạn có thể trả lời ngay trong ô chat.")); return false;
+                    }
                     _observe(new("completed", "Hoàn thành lượt chat."));
                     return true;
                 }
@@ -178,14 +273,28 @@ public sealed class AgentLoop
                     }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { result = "error: " + ex.Message; }
+                    var filesChanged = call.Name is "write_file" or "edit_file" ? _tools.LastFileChangeApplied && !ToolOutcome.IsFailure(result)
+                        : call.Name == "run_command" && _tools.LastCommandChangedFiles.Count > 0;
+                    verification?.Record(call, result, filesChanged,
+                        imageCaptured: call.Name == "computer_screenshot" && _tools.LastComputerImage is not null);
+                    if (verification is not null && filesChanged)
+                    {
+                        // A fix starts another real verification attempt. The
+                        // same failing check after a new edit is not a blind retry.
+                        failures.Clear(); protocolRetries = 0;
+                        previousObservation = null; repeatedObservations = 0;
+                    }
                     var receipt = $"Tool result for {call.Name}:\n{result}";
-                    messages.Add(new() { ["role"] = "user", ["content"] = call.Name.StartsWith("computer_") && _tools.LastComputerImage is { } image
+                    messages.Add(new() { ["role"] = "user", ["muse_tool"] = call.Name, ["muse_path"] = path,
+                        ["muse_command"] = call.Name == "run_command" && call.Args["command"]?.ToString() is { } commandText
+                            ? commandText[..Math.Min(500, commandText.Length)] : null,
+                        ["content"] = call.Name.StartsWith("computer_") && _tools.LastComputerImage is { } image
                         ? new JsonArray(new JsonObject { ["type"] = "text", ["text"] = receipt }, new JsonObject { ["type"] = "image_url", ["attachment_id"] = Guid.NewGuid().ToString("N"), ["image_url"] = new JsonObject { ["url"] = image } })
                         : JsonValue.Create(receipt) });
                     _observe(new("tool_result", result, call.Name, path));
                     // Stop a repeated observation loop, not productive long tasks
                     // or a running command that legitimately has no new output.
-                    var observation = call.Name + call.Args.ToJsonString() + result;
+                    var observation = ObservationKey(call, result);
                     repeatedObservations = observation == previousObservation ? repeatedObservations + 1 : 1;
                     previousObservation = observation;
                     if (!ToolOutcome.IsFailure(result) && !ToolOutcome.IsRunning(result) && repeatedObservations >= 3)
@@ -236,10 +345,24 @@ public sealed class AgentLoop
         }
         finally
         {
+            if (verification is not null && Goal is not null)
+            {
+                Goal.Status = _turnOutcome?.Kind == "completed" && verification.Missing.Count == 0 ? "completed"
+                    : _turnOutcome?.Kind == "waiting_input" ? "waiting_input" : "paused";
+                Goal.Summary = Goal.Status == "completed" ? "Đã kiểm chứng test tự động và giao diện.\n" + verification.LastTestSummary
+                    : (_turnOutcome?.Text ?? "Lượt xử lý bị gián đoạn.") + "\nCòn cần: " + string.Join("; ", verification.Missing);
+                Goal.UpdatedAt = DateTimeOffset.UtcNow;
+            }
             if (messages.Count > 1)
             {
+                messages[^1]["muse_turn_outcome"] = new JsonObject
+                {
+                    ["goal"] = prompt[..Math.Min(1000, prompt.Length)], ["status"] = _turnOutcome?.Kind ?? "interrupted",
+                    ["summary"] = _turnOutcome?.Text ?? "Lượt chat bị gián đoạn; cần kiểm tra kết quả trước khi tiếp tục.",
+                };
+                ConversationContext.Compact(messages, _tools.Root, protectedPrefix: 1);
                 History.Clear();
-                History.AddRange(messages.Skip(1).TakeLast(200).Select(m => WithoutImage(m)));
+                History.AddRange(messages.Skip(1).Select(m => WithoutImage(m)));
             }
             Interlocked.Exchange(ref _running, 0);
         }
@@ -252,6 +375,8 @@ public sealed class AgentLoop
         var keptImage = false;
         foreach (var original in messages.Skip(1).Reverse())
         {
+            // Already represented by the fresh conversation_context packet.
+            if (original["role"]?.ToString() == "system" && original["content"]?.ToString().StartsWith(ConversationContext.ArchivePrefix, StringComparison.Ordinal) == true) continue;
             var hasImage = original["content"] is JsonArray parts && parts.OfType<JsonObject>().Any(p => p["type"]?.ToString() == "image_url");
             var message = hasImage && keptImage ? WithoutImage(original) : original;
             var length = hasImage ? WithoutImage(message).ToJsonString().Length + 2048 : message.ToJsonString().Length;
@@ -265,6 +390,30 @@ public sealed class AgentLoop
         if (selected.Count < messages.Count)
             selected.Insert(1, new() { ["role"] = "system", ["content"] = "Older messages were omitted for context limits. Re-read project files when needed; do not assume their contents." });
         return selected;
+    }
+
+    private static string ObservationKey(ToolCall call, string result)
+    {
+        // Fresh element/capture IDs are required for safe input, but are not
+        // evidence of progress. Otherwise an unchanged UI can loop forever.
+        if (call.Name is "computer_inspect" or "computer_screenshot")
+        {
+            try
+            {
+                if (JsonNode.Parse(result) is JsonObject state)
+                {
+                    if (call.Name == "computer_screenshot" && string.IsNullOrEmpty(state["image_fingerprint"]?.ToString()))
+                        return call.Name + call.Args.ToJsonString() + result;
+                    state.Remove("snapshot_id"); state.Remove("inspection_id");
+                    if (state["elements"] is JsonArray elements)
+                        foreach (var element in elements.OfType<JsonObject>()) element.Remove("element_id");
+                    var args = (JsonObject)call.Args.DeepClone(); args.Remove("element_id"); args.Remove("snapshot_id");
+                    return call.Name + args.ToJsonString() + state.ToJsonString();
+                }
+            }
+            catch (System.Text.Json.JsonException) { }
+        }
+        return call.Name + call.Args.ToJsonString() + result;
     }
 
     private static JsonObject WithoutImage(JsonObject message)

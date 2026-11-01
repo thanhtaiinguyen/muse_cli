@@ -56,12 +56,13 @@ public sealed partial class ToolExecutor
         finally { invocation.Cleanup(); }
     }
 
-    private sealed record ShellInvocation(string File, string[] Args, Encoding? Encoding, string? TemporaryDirectory = null)
+    private sealed record ShellInvocation(string File, string[] Args, Encoding? Encoding, string? TemporaryDirectory = null,
+        string TemporaryScriptName = "command.cmd")
     {
         public void Cleanup()
         {
             if (TemporaryDirectory is null) return;
-            var script = Path.Combine(TemporaryDirectory, "command.cmd");
+            var script = Path.Combine(TemporaryDirectory, TemporaryScriptName);
             if (System.IO.File.Exists(script)) System.IO.File.Delete(script);
             if (Directory.Exists(TemporaryDirectory)) Directory.Delete(TemporaryDirectory);
         }
@@ -72,12 +73,21 @@ public sealed partial class ToolExecutor
         var (file, args) = ResolveShell(shell, command);
         if (OperatingSystem.IsWindows() && Path.GetFileName(file).Equals("powershell.exe", StringComparison.OrdinalIgnoreCase))
         {
-            // EncodedCommand transports multiline Unicode/quotes without a
-            // second command-line quoting pass. Non-terminating PowerShell
+            // A private UTF-8 script preserves multiline Unicode/quotes without
+            // EncodedCommand's CLIXML stderr transport. Non-terminating PowerShell
             // errors and failed native tools must not be reported as exit 0.
             var script = "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n$OutputEncoding = [Console]::OutputEncoding\n$ErrorActionPreference = 'Stop'\n$global:LASTEXITCODE = 0\ntry {\n" + command
                 + "\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\nif (-not $?) { exit 1 }\n} catch { [Console]::Error.WriteLine($_.ToString()); exit 1 }";
-            args = new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) };
+            var directory = Path.Combine(Path.GetTempPath(), "muse-command-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "command.ps1");
+            try
+            {
+                // Windows PowerShell 5 needs a BOM to recognize UTF-8 scripts.
+                await File.WriteAllTextAsync(path, script, new UTF8Encoding(true), cancel);
+                return new(file, new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path }, Encoding.UTF8, directory, "command.ps1");
+            }
+            catch { if (System.IO.File.Exists(path)) System.IO.File.Delete(path); Directory.Delete(directory); throw; }
         }
         if (OperatingSystem.IsWindows() && Path.GetFileName(file).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase))
         {

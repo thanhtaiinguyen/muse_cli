@@ -4,8 +4,8 @@
 
 ## Mở ứng dụng
 
-Mở **`dist\Muse\Muse.exe`** sau khi publish thành công. Phiên bản mã nguồn hiện tại là **0.8.7 (bản tích hợp .NET 10)**; bản đã đóng gói kèm runtime nên không cần cài SDK hay mở terminal.
-Người dùng đã kiểm tra tay và xác nhận bản tích hợp hoạt động OK ngày 31/10/2026. Bản đóng gói tại máy hiện vẫn dùng `-Preview` và hồ sơ thử riêng; việc xác nhận không tự chuyển đổi hồ sơ chính. Xem [hướng dẫn kiểm tra tay](MANUAL_TESTING_NET10.md).
+Mở **`dist\Muse\Muse.exe`** sau khi publish thành công. Phiên bản mã nguồn hiện tại là **0.9.0 (.NET 10)**; bản đã đóng gói kèm runtime nên không cần cài SDK hay mở terminal.
+Người dùng đã xác nhận kiểm tra tay bản 0.8.7 ngày 31/10/2026. Bản 0.8.8 sửa chat, 0.8.9 thêm bộ nhớ, 0.8.10 thêm thông báo cập nhật; 0.8.11 hoàn thiện luồng điều khiển cửa sổ. 0.9.0 thêm đăng nhập nhiều tài khoản cùng lúc, xuất Base URL + API key chuẩn OpenAI và kỹ năng gọi bằng @alias (xem mục riêng bên dưới). Cần kiểm tra tay lại các tình huống mới; không dùng xác nhận của 0.8.7 thay cho kết quả mới. Bản đóng gói vẫn dùng `-Preview` và hồ sơ thử riêng. Xem [hướng dẫn kiểm tra tay](MANUAL_TESTING_NET10.md).
 Nếu đang mở bản cũ, đóng cửa sổ cũ trước khi mở bản mới.
 
 Ngay trong ứng dụng:
@@ -20,6 +20,14 @@ cần lấy/nhập API key, admin key, chọn cổng, chạy server hay nạp co
 ## Không gian làm việc
 
 - Hội thoại là màn hình chính; Enter để gửi, Shift+Enter để xuống dòng.
+- Từ 0.8.10, app tự kiểm tra cập nhật khi mở và định kỳ 6 giờ trong lúc đang
+  chạy. Có bản mới sẽ hiện banner gọn, không ngắt chat. Có nút **Kiểm tra cập
+  nhật** trong Cài đặt và **Ẩn thông báo** cho phiên bản đang được báo.
+  Bản đóng gói kiểm tra GitHub Releases; bản chạy từ source kiểm tra phiên bản
+  trên `main`. Xem [cập nhật và phát hành](UPDATES.md).
+- Nhắc đến việc chạy/test trong lời trao đổi không tự tạo yêu cầu phải chạy lệnh.
+  Yêu cầu thao tác thật vẫn cần kết quả công cụ; khi thiếu kết quả, app giữ phản hồi
+  để Muse xử lý phần còn thiếu trong cùng cuộc chat.
 - Không tự dừng sau 30 bước. Muse tiếp tục đến khi hoàn thành, cần bạn trả lời,
   bạn bấm Dừng, hoặc gặp lỗi/vòng lặp không tiến triển. Chi tiết thao tác ở Terminal;
   chat chỉ có trạng thái hiện tại và câu trả lời cuối.
@@ -29,19 +37,49 @@ cần lấy/nhập API key, admin key, chọn cổng, chạy server hay nạp co
 - Dán ảnh chụp màn hình bằng **Ctrl+V**, **Shift+Insert**, chuột phải → Dán
   hoặc nút **Dán ảnh**. Có ảnh xem trước và nút bỏ ảnh trước khi gửi; có thể
   gửi ảnh không kèm chữ. Tối đa 4 ảnh, 8 MiB mỗi ảnh, tổng 16 MiB mỗi lượt.
-- Tin nhắn **BẠN** nằm bên phải, nền tím nhẹ; **MUSE · AI** nằm bên trái.
-  Mỗi tin nhắn có nút Sao chép; hoạt động công cụ xem trong bảng Chi tiết.
-- Phong cách Mesh Gradient: nền xanh đen, tím/cyan/hồng, nút chuyển sắc,
-  khối bo góc và biểu tượng vector. Có chế độ sáng và tối; giữ tiếng Việt.
-  Gradient được lưu đệm, không chạy hiệu ứng chuyển động nền.
+- Tin nhắn của bạn nằm bên phải, nền xanh; phản hồi Muse nằm bên trái, có
+  nút Sao chép. Chi tiết công cụ nằm trong Terminal.
+- Giao diện sáng/tối với khối bo góc, nút xanh và biểu tượng vector; giữ tiếng Việt.
+  Câu trả lời hoàn tất dừng hiệu ứng nhả chữ và con trỏ.
 - Lịch sử ở thanh bên, lưu riêng theo từng dự án.
+- Chat dài được nén trích đoạn trên máy: giữ mục tiêu ban đầu, lời dặn, lựa chọn,
+  trạng thái hoàn tất/dang dở và kết quả công cụ gần đây. Gói nhớ được gửi kèm
+  yêu cầu hiện tại tới đúng cuộc chat Muse đang dùng; không tạo chat hoặc gọi
+  AI riêng để tóm tắt. Các lượt tiếp theo dùng chỉ dẫn giao thức ngắn hơn.
+- Khi hỏi lại chuyện cũ, tool tìm tối đa 4 đoạn liên quan trong lịch sử cục bộ.
+  Bộ nhớ được lưu cùng phiên và khôi phục khi mở lại; lịch sử hiển thị không bị
+  xóa bởi việc nén. Bộ nhớ có giới hạn và không giữ ảnh hay toàn bộ mã nguồn;
+  cần đọc lại tệp trước khi sửa, đính kèm lại ảnh khi cần. Tool không điều khiển
+  được giới hạn ngữ cảnh bên trong dịch vụ Muse. Xem [cơ chế bộ nhớ](CONTEXT_MEMORY.md).
 - **Tệp dự án** mở trình xem/sửa tệp khi cần.
 - **Thay đổi** hiển thị kết quả và cho phép hoàn tác tệp.
 - Trước khi ghi tệp, Muse hiển thị nội dung trước/sau để bạn duyệt.
 - **Dừng** hủy yêu cầu đang chạy; các bước đã hoàn tất vẫn được giữ lại.
 - **Terminal** mở nhật ký và ô chạy lệnh, có lựa chọn PowerShell/CMD/Bash; tuỳ chọn nâng cao nằm trong **Cài đặt**.
 - **Chạy nền** giữ ứng dụng hoặc máy chủ hoạt động trong lúc kiểm thử; **Dừng nền** kết thúc các tiến trình Muse đã mở.
-- **Màn hình** chọn cửa sổ để Muse đọc giao diện, chụp ảnh, nhập dữ liệu, bấm nút và kiểm tra trạng thái. Khi cần, Muse tự mở hộp chọn cửa sổ; Esc dừng điều khiển.
+- **Màn hình** có tìm kiếm cửa sổ theo tiêu đề/tên ứng dụng. Muse đọc/tìm phần tử,
+  chụp ảnh, nhập liệu, bấm trái/phải/đúp, kéo thả, cuộn dọc/ngang và xác minh kết quả.
+  Quyền chỉ trong cửa sổ đã chọn và hộp thoại/menu cùng tiến trình do nó mở, cho
+  lượt hiện tại. Dừng/Esc thu hồi ngay; không điều khiển cửa sổ cấp quyền của chính Muse.
+  Xem [hướng dẫn điều khiển](SCREEN_CONTROL.md), gồm giới hạn và phần cần kiểm tra tay.
+
+## Nhiều tài khoản, kết nối OpenAI và kỹ năng (0.9.0)
+
+- **Nhiều tài khoản cùng lúc:** trong **Cài đặt → Tài khoản Muse**, bấm
+  **Thêm tài khoản** để đăng nhập thêm tài khoản Muse khác. Mọi tài khoản
+  đang bật đều hoạt động đồng thời; gateway tự chia phiên, làm mát và
+  chuyển phiên khi một tài khoản lỗi. Có thể bật/tắt hoặc xóa từng tài khoản.
+- **Kết nối OpenAI (kiểu 9router):** **Cài đặt → Kết nối OpenAI (trên máy này)**
+  hiển thị **Base URL** dạng `http://127.0.0.1:<cổng>/v1` và **API key** để
+  dán vào ứng dụng khác tương thích OpenAI. Cổng được chọn ngẫu nhiên mỗi
+  lần mở app, nên hãy sao chép lại link sau khi khởi động lại. Có thể tạo
+  thêm key riêng, thu hồi hoặc xóa key; key mới chỉ hiển thị đầy đủ một lần.
+- **Kỹ năng @alias:** **Cài đặt → Kỹ năng** cho phép cài skill từ file
+  `.md`/`.txt` hoặc gói `.zip` chứa `SKILL.md` (frontmatter `name`,
+  `description`, `alias`; không có frontmatter thì alias lấy từ tên file).
+  Khi chat, viết `@tenskill` — ví dụ `@fe dựng layout này` — để áp dụng nội
+  dung skill cho lượt đó. Skill được lưu ở
+  `%LOCALAPPDATA%\Muse2Api.WinForms\Skills` và có thể bật/tắt hoặc xóa.
 
 Dữ liệu cá nhân được lưu dưới `%LOCALAPPDATA%\Muse2Api.WinForms`.
 Ứng dụng dùng gateway riêng trên địa chỉ loopback với cổng tự chọn, không thay
@@ -58,7 +96,12 @@ Trên Windows, gateway mã hóa API key, account và browser session bằng
 DPAPI CurrentUser. Dùng `MUSE_DESKTOP_PROFILE_ROOT` để test riêng, không
 làm đổi cookie hoặc lịch sử của bản cũ. Trên Linux, DPAPI không hoạt động.
 
-**Turbo không tự duyệt lệnh shell hoặc file cấu hình nhạy cảm.**
+**Turbo tự duyệt sửa mã/cấu hình build và chạy lệnh terminal, gồm tiến trình nền.**
+Tệp bí mật và chính sách agent/CI vẫn có bước duyệt riêng. Bấm Dừng để ngắt;
+Esc cũng dừng khi Muse nhận phím hoặc đang điều khiển cửa sổ đã chọn.
+Nhập `/goal <mục tiêu>` để xây dựng, chạy test, vá lỗi và kiểm thử giao diện
+đến khi có kết quả kiểm chứng. `/goal` tiếp tục mục tiêu đã lưu; `/goal status`
+xem trạng thái; `/goal stop` tạm dừng. Xem [GOAL.md](GOAL.md).
 Xem [SECURITY.md](SECURITY.md) và [COMMERCIAL-LICENSING.md](COMMERCIAL-LICENSING.md).
 Bản 0.8.7 đã được người dùng kiểm tra tay và xác nhận OK; hồ sơ gốc vẫn được giữ nguyên. Không có giấy phép thương mại mới được cấp bởi bản cập nhật này.
 

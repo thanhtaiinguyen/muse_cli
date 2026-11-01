@@ -2,15 +2,16 @@
 
 Lớp `DesktopComputer` triển khai `IComputerTools` của agent, dùng UI Automation
 cho cấu trúc/giá trị/control patterns và Win32 SendInput cho chuột/phím.
-Mọi lời gọi UIA chạy trên MTA worker ngoài luồng UI, có timeout và kiểm tra
+Mọi lời gọi UIA chạy trên MTA worker sống lâu ngoài luồng UI, có timeout và kiểm tra
 generation để thao tác cũ không tiếp tục sau khi quyền bị thu hồi.
 
 Frontend xin phép chọn một cửa sổ cho mỗi lượt. Chỉ handle và process đã chọn
-được dùng; PID của chính host Muse bị loại để không điều khiển hộp duyệt của
+được dùng, kèm menu/dialog cùng PID có chuỗi owner về cửa sổ gốc; PID của chính host Muse bị loại để không điều khiển hộp duyệt của
 mình. Đăng ký Esc toàn cục trong lượt, hủy và bỏ quyền khi kết thúc hoặc đổi
 dự án. Không thao tác password controls. Screenshot dùng vùng cửa sổ đang ở
 foreground, giữ snapshot id/bounds/scale; click từ ảnh cũ, ngoài ảnh hoặc sau
-khi cửa sổ di chuyển bị từ chối. UIA ids hết hạn sau 180 giây; ảnh sau 120 giây.
+khi cửa sổ di chuyển bị từ chối. UIA ids hết hạn sau 180 giây hoặc inspect lại;
+ảnh sau 120 giây hoặc bất kỳ thao tác UI. Hàng đợi provider bị treo không chờ vô hạn.
 
 Kết quả action chỉ xác nhận đã gửi thao tác. `computer_assert` quan sát tên,
 giá trị, checkbox hoặc trạng thái chọn/enabled với thời gian chờ hữu hạn.
@@ -27,5 +28,6 @@ Tham khảo chính thức: [Control patterns](https://learn.microsoft.com/en-us/
 [SendInput và giới hạn integrity level](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput).
 Lưu phiên trình duyệt dựa trên [Playwright authentication state](https://playwright.dev/dotnet/docs/auth).
 
-Kiểm thử native có opt-in riêng. Hiện giữ `MUSE_COMPUTER_TESTS=0` theo yêu cầu
-không mở thêm cửa sổ. Xem TESTING.md ở thư mục gốc để biết bằng chứng và giới hạn.
+Kiểm thử chuột/phím thật có opt-in riêng, hiện giữ `MUSE_COMPUTER_TESTS=0`.
+Các bài UIA mới tạo HWND nhưng không Show form, không đổi focus. Xem
+[SCREEN_CONTROL.md](../../SCREEN_CONTROL.md) về tính năng, kiểm chứng và giới hạn.

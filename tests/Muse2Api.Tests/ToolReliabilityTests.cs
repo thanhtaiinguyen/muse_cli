@@ -6,6 +6,38 @@ namespace Muse2Api.Tests;
 
 public class ToolReliabilityTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PowerShellDiagnosticsRemainReadableWithoutClixml(bool background)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var dir = new TempDirectory();
+        var tools = new ToolExecutor(dir.Root, "powershell");
+        try
+        {
+            var output = new System.Text.StringBuilder();
+            var prepared = await tools.PrepareAsync(new("run_command", new()
+            {
+                ["command"] = "Write-Progress -Activity 'fixture progress' -PercentComplete 50; Write-Warning 'fixture warning'; Write-Output 'Tiếng Việt'; Write-Error 'fixture error'",
+                ["background"] = background,
+            }));
+            var result = await tools.ExecutePreparedAsync(prepared, output: chunk => output.Append(chunk));
+            if (background)
+            {
+                var id = Regex.Match(result, @"process_id=([a-f0-9]+)").Groups[1].Value;
+                result = await tools.ExecuteAsync(new("process_status", new() { ["process_id"] = id, ["wait_ms"] = 5000 }));
+            }
+            Assert.True(ToolOutcome.IsFailure(result), result);
+            Assert.Contains("fixture warning", result);
+            Assert.Contains("fixture error", result);
+            Assert.Contains("Tiếng Việt", result);
+            Assert.DoesNotContain("CLIXML", result + output);
+            Assert.DoesNotContain("<Objs", result + output);
+        }
+        finally { await tools.StopBackgroundProcessesAsync(); }
+    }
+
     [Fact]
     public async Task DirectoryPaging_DoesNotSilentlyHideFilesBeyondTheFirstPage()
     {

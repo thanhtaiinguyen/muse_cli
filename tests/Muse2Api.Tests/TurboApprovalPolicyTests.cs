@@ -16,8 +16,8 @@ public class TurboApprovalPolicyTests
     [InlineData("run_command")]
     [InlineData("process_input")]
     [InlineData("process_stop")]
-    public void ShellAndProcessToolsAlwaysRequireApproval(string tool)
-        => Assert.True(TurboApprovalPolicy.RequiresExplicitApproval(Call(tool)));
+    public void TurboApprovesShellAndProcessTools(string tool)
+        => Assert.False(TurboApprovalPolicy.RequiresExplicitApproval(Call(tool)));
 
     [Theory]
     [InlineData(".env")]
@@ -25,7 +25,6 @@ public class TurboApprovalPolicyTests
     [InlineData("security/private.key")]
     [InlineData(".github/workflows/build.yml")]
     [InlineData("AGENTS.md")]
-    [InlineData("src/Muse2Api/Muse2Api.csproj")]
     [InlineData("folder\\secrets\\token.txt")]
     public void SensitiveFileEditsRequireApproval(string file)
         => Assert.True(TurboApprovalPolicy.RequiresExplicitApproval(Call("edit_file", file)));
@@ -33,6 +32,11 @@ public class TurboApprovalPolicyTests
     [Theory]
     [InlineData("src/Example.cs")]
     [InlineData("docs/README.md")]
+    [InlineData("src/Muse2Api/Muse2Api.csproj")]
+    [InlineData("Muse.sln")]
+    [InlineData("Directory.Build.targets")]
+    [InlineData("Directory.Packages.props")]
+    [InlineData("global.json")]
     public void NormalWorkspaceEditsCanBeAutoApproved(string file)
         => Assert.False(TurboApprovalPolicy.RequiresExplicitApproval(Call("write_file", file)));
 
@@ -49,20 +53,17 @@ public class TurboApprovalPolicyTests
     }
 
     [Theory]
-    [InlineData("Directory.Build.targets")]
-    [InlineData("Directory.Packages.props")]
-    [InlineData("global.json")]
     [InlineData("accounts.json")]
     [InlineData("api_key")]
-    public void BuildAndCredentialConfigurationRequiresApproval(string path)
+    public void CredentialConfigurationRequiresApproval(string path)
         => Assert.True(TurboApprovalPolicy.RequiresExplicitApproval(Call("edit_file",path)));
 
     [Theory]
     [InlineData("run_cmd")]
     [InlineData("run_powershell")]
     [InlineData("runCommand")]
-    public void ShellAliasesRequireApproval(string tool)
-        => Assert.True(TurboApprovalPolicy.RequiresExplicitApproval(Call(tool)));
+    public void TurboApprovesShellAliases(string tool)
+        => Assert.False(TurboApprovalPolicy.RequiresExplicitApproval(Call(tool)));
 
     [Theory]
     [InlineData("AGENTS.md","AGENTS.md.")]

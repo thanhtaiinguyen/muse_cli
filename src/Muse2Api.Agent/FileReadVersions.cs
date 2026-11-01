@@ -13,7 +13,7 @@ public sealed partial class ToolExecutor
     }
     private readonly Dictionary<string, ReadVersion> _readVersions = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     public bool LastFileChangeApplied { get; private set; }
-    public void BeginAgentTurn() { lock (_changeLock) _readVersions.Clear(); }
+    public void BeginAgentTurn() { lock (_changeLock) _readVersions.Clear(); LastComputerImage = null; }
 
     public static string ContentHash(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
 

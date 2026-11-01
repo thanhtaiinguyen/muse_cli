@@ -43,6 +43,7 @@ internal static class DesktopCopy
             "computer_screenshot" => "Đang chụp cửa sổ đã chọn",
             "computer_assert" => "Đang xác nhận kết quả trên giao diện",
             "computer_invoke" or "computer_click" => "Đang gửi thao tác bấm trên cửa sổ đã chọn",
+            "computer_drag" => "Đang kéo thả trong cửa sổ đã chọn",
             "computer_type" or "computer_set_value" => "Đang gửi dữ liệu tới ô nhập đã chọn",
             _ when tool?.StartsWith("computer_") == true => "Đang thao tác trên cửa sổ đã chọn · Esc để dừng",
             _ => "Đang xử lý yêu cầu",

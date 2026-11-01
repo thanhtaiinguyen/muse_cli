@@ -16,9 +16,17 @@ public sealed class MainForm : Form
     private Task<bool>? _setupTask;
     private LoginForm? _login;
     private bool _closing, _closed;
+    private readonly HttpClient _updateHttp = new(new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false });
+    private readonly DesktopUpdates _updates;
+    private readonly UpdateFeed _updateFeed = DesktopUpdates.DetectFeed(AppContext.BaseDirectory);
+    private readonly UpdateNoticeControl _updateNotice = new() { Dock = DockStyle.Fill, Visible = false };
+    private readonly System.Windows.Forms.Timer _updateTimer = new() { Interval = (int)DesktopUpdates.CheckInterval.TotalMilliseconds };
+    private Task<UpdateCheckResult>? _updateTask;
+    private UpdateCheckResult? _lastUpdate;
 
     public MainForm()
     {
+        _updates = new DesktopUpdates(_updateHttp, Path.Combine(DesktopDataPaths.Root, "Updates"));
         SuspendLayout();
         AutoScaleDimensions = new SizeF(96, 96);
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -35,12 +43,21 @@ public sealed class MainForm : Form
         MinimumSize = new Size(900, 640);
         StartPosition = FormStartPosition.CenterScreen;
         _workspace = new AgentWorkspaceControl(GetConnection, ConnectAccount, () => EnsureConnected(), OpenSettings);
-        Controls.Add(_workspace);
+        var root = DesktopTheme.Column(new(SizeType.AutoSize), new(SizeType.Percent, 100));
+        root.Controls.Add(_updateNotice, 0, 0); root.Controls.Add(_workspace, 0, 1); Controls.Add(root);
+        _updateNotice.OpenRequested += OpenUpdate;
+        _updateNotice.DismissRequested += async update =>
+        {
+            try { await _updates.DismissAsync(update, _lifetime.Token); }
+            catch (OperationCanceledException) { }
+        };
+        _updateTimer.Tick += async (_, _) => await CheckForUpdates();
         DesktopTheme.Apply(this);
         DesktopTheme.ThemeChanged += (_, _) => { BackColor = DesktopTheme.Background; DesktopTheme.Apply(this); };
         ResumeLayout(performLayout: true);
         Shown += async (_, _) =>
         {
+            _ = CheckForUpdates(); _updateTimer.Start();
             _setupTask = ConnectCore(interactive: false, forceLogin: false);
             await _setupTask;
         };
@@ -73,12 +90,19 @@ public sealed class MainForm : Form
         await _setupTask;
     }
 
+    private async Task AddAccount()
+    {
+        if (_setupTask is { IsCompleted: false }) { await _setupTask; return; }
+        _setupTask = ConnectCore(interactive: true, forceLogin: true, addAccount: true);
+        await _setupTask;
+    }
+
     private void Status(string title, string description, bool connected = false, bool working = false)
     {
         if (!IsDisposed) _workspace.SetConnectionState(title, description, connected, working);
     }
 
-    private async Task<bool> ConnectCore(bool interactive, bool forceLogin)
+    private async Task<bool> ConnectCore(bool interactive, bool forceLogin, bool addAccount = false)
     {
         try
         {
@@ -119,8 +143,12 @@ public sealed class MainForm : Form
                     return false;
                 }
                 Status("Đăng nhập Muse", "Đăng nhập trong cửa sổ vừa mở. Kết nối sẽ được lưu tự động.", working: true);
-                var savedAccount = _gateway.State.Pool.All().Where(a => a.Enabled && Upstream.MissingSessionCookies(a.Cookies).Count == 0).OrderByDescending(a => a.LastUsedAt).FirstOrDefault();
-                _login = new LoginForm(_client, () => _gateway.BaseUrl!, () => _gateway.AdminKey, "Tài khoản cá nhân", savedAccount: savedAccount);
+                // "Thêm tài khoản" starts from a clean browser session so the
+                // user can sign in with a different Muse account; a restore
+                // login reuses the most recent saved account's cookies.
+                var savedAccount = addAccount ? null : _gateway.State.Pool.All().Where(a => a.Enabled && Upstream.MissingSessionCookies(a.Cookies).Count == 0).OrderByDescending(a => a.LastUsedAt).FirstOrDefault();
+                var label = addAccount ? $"Tài khoản {_gateway.State.Pool.All().Count + 1}" : "Tài khoản cá nhân";
+                _login = new LoginForm(_client, () => _gateway.BaseUrl!, () => _gateway.AdminKey, label, savedAccount: savedAccount, clearExistingSession: addAccount);
                 using (_login)
                 {
                     if (_login.ShowDialog(this) != DialogResult.OK)
@@ -128,12 +156,9 @@ public sealed class MainForm : Form
                         Status("Chưa hoàn tất đăng nhập", "Bạn có thể bấm Kết nối Muse để tiếp tục bất cứ lúc nào.");
                         return false;
                     }
-                    var selected = _login.LastAccountId;
-                    foreach (var account in _gateway.State.Pool.All())
-                    {
-                        account.Enabled = account.Id == selected;
-                        _gateway.State.Pool.Upsert(account);
-                    }
+                    // Multi-account: every signed-in account stays enabled
+                    // and the gateway pool schedules them together. Accounts
+                    // are toggled individually in Cài đặt, never implicitly.
                 }
                 _login = null;
             }
@@ -190,7 +215,35 @@ public sealed class MainForm : Form
     }
 
     private void OpenSettings()
-        => _workspace.ShowPreferences(this, _dataDirectory, _diagnostics.ToString());
+        => _workspace.ShowPreferences(this, _dataDirectory, _diagnostics.ToString(), () => CheckForUpdates(manual: true), OpenUpdate, _lastUpdate, _updateFeed, AddAccount);
+
+    private async Task<UpdateCheckResult> CheckForUpdates(bool manual = false)
+    {
+        try
+        {
+            if (_updateTask is not { IsCompleted: false })
+                _updateTask = _updates.CheckAsync(Application.ProductVersion, _updateFeed, manual, _lifetime.Token);
+            var result = await _updateTask;
+            if (_closing || IsDisposed) return result;
+            _lastUpdate = result;
+            if (result is { Status: UpdateStatus.Available, Notify: true, Update: { } update }) _updateNotice.ShowUpdate(update);
+            else if (result.Status is UpdateStatus.Current or UpdateStatus.NoRelease) _updateNotice.Visible = false;
+            return result;
+        }
+        catch (OperationCanceledException) { return new(UpdateStatus.Unavailable, "Đã dừng kiểm tra cập nhật."); }
+        catch (Exception ex)
+        {
+            _diagnostics.AppendLine("Update check: " + ex.GetType().Name);
+            return new(UpdateStatus.Unavailable, "Chưa kiểm tra được cập nhật. Hãy thử lại sau.");
+        }
+    }
+
+    private void OpenUpdate(AvailableUpdate update)
+    {
+        if (!DesktopUpdates.IsTrustedLink(update)) return;
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(update.Url) { UseShellExecute = true }); }
+        catch (Exception ex) { _diagnostics.AppendLine("Open update: " + ex.GetType().Name); }
+    }
 
     private async void CloseApplication(object? sender, FormClosingEventArgs e)
     {
@@ -199,12 +252,14 @@ public sealed class MainForm : Form
         if (_closing) return;
         if (!_workspace.CanCloseWorkspace()) return;
         _closing = true;
+        _updateTimer.Stop();
         _lifetime.Cancel();
         _login?.Close();
         try
         {
             await _workspace.StopAsync();
             if (_setupTask is not null) await _setupTask;
+            if (_updateTask is not null) { try { await _updateTask; } catch (OperationCanceledException) { } }
             if (_gateway is not null) await _gateway.DisposeAsync();
         }
         catch (Exception ex) { _diagnostics.AppendLine(ex.ToString()); }
@@ -212,5 +267,14 @@ public sealed class MainForm : Form
         _lifetime.Dispose();
         _closed = true;
         Close();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _updateTimer.Dispose(); _updateHttp.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }

@@ -7,6 +7,8 @@ namespace Muse2Api.WinForms;
 
 public sealed partial class AgentWorkspaceControl
 {
+    private int _sessionLoadVersion;
+    private bool _startingOperation;
     private string? _pendingAssistantText;
     private async Task RestoreWorkspace()
     {
@@ -32,6 +34,7 @@ public sealed partial class AgentWorkspaceControl
 
     private async Task SetWorkspace(string path)
     {
+        Interlocked.Increment(ref _sessionLoadVersion);
         if (_tools is not null) await _tools.StopBackgroundProcessesAsync();
         _manualProcessId = null;
         DisableComputer();
@@ -55,6 +58,7 @@ public sealed partial class AgentWorkspaceControl
 
     private void NewSession()
     {
+        Interlocked.Increment(ref _sessionLoadVersion);
         if (_tools is null) return;
         _session = new ChatSession { Workspace = _tools.Root, Model = _models.Text };
         _chat.Clear(); _console.Clear();
@@ -67,7 +71,10 @@ public sealed partial class AgentWorkspaceControl
     private async Task RefreshSessions(CancellationToken cancel = default)
     {
         if (_tools is null) return;
-        var sessions = await _store.ListAsync(_tools.Root, cancel);
+        var tools = _tools;
+        var loadVersion = _sessionLoadVersion;
+        var sessions = await _store.ListAsync(tools.Root, cancel);
+        if (tools != _tools || loadVersion != _sessionLoadVersion) return;
         _binding = true;
         try
         {
@@ -80,32 +87,41 @@ public sealed partial class AgentWorkspaceControl
 
     private async Task LoadSession(string id)
     {
-        if (_tools is null || _busy) return;
+        if (_tools is null || _busy || _startingOperation) return;
+        var loadVersion = Interlocked.Increment(ref _sessionLoadVersion);
+        var workspaceRoot = _tools.Root;
         try
         {
-            _session = await _store.LoadAsync(_tools.Root, id);
+            var loaded = await _store.LoadAsync(workspaceRoot, id);
+            if (loadVersion != _sessionLoadVersion || _busy || _startingOperation || workspaceRoot != _tools?.Root) return;
+            _session = loaded;
             ClearImageDraft();
             _models.Text = _session.Model;
             _chat.Clear(); _console.Clear();
             _activeThinking = null; _activeToolCall = null; _activeAssistantCard = null;
             string? pendingAnswer = null;
+            ToolCallCard? pendingTool = null;
             foreach (var item in _session.Events)
             {
                 switch (item.Kind)
                 {
                     case "user":
+                        pendingTool?.SetResult("error: Lượt trước chưa có kết quả xác minh.", true); pendingTool = null;
                         pendingAnswer = null;
                         _chat.AddUserMessage(item.Text);
                         break;
                     case "tool_start":
                         pendingAnswer = null;
-                        _chat.AddToolCall(item.Tool ?? "tool", item.Path, item.Text).SetResult("", isError: false);
+                        pendingTool?.SetResult("error: Chưa có kết quả cho thao tác này.", true);
+                        pendingTool = _chat.AddToolCall(item.Tool ?? "tool", item.Path, item.Text);
+                        pendingTool.ViewDetailsClicked += () => ToggleDrawer(2, forceOpen: true);
                         break;
                     case "tool_result":
                     case "terminal_result":
+                        pendingTool?.SetResult(item.Text, ToolOutcome.IsFailure(item.Text)); pendingTool = null;
                         break;
                     case "assistant":
-                        pendingAnswer = ToolCallParser.StripToolBlocks(item.Text);
+                        pendingAnswer = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(item.Text));
                         break;
                     case "completed":
                     case "waiting_input":
@@ -116,16 +132,22 @@ public sealed partial class AgentWorkspaceControl
                     case "incomplete":
                     case "declined":
                     case "cancelled":
+                        pendingTool?.SetResult("error: Lượt xử lý đã dừng trước khi có kết quả.", true); pendingTool = null;
                         _chat.AddNotice(item.Kind == "error" ? DesktopCopy.FriendlyError(item.Text) : item.Text);
                         pendingAnswer = null;
                         break;
                 }
                 if (item.Kind is "tool_start" or "tool_result" or "terminal_result" or "command_output" or "error" or "cancelled" or "incomplete" or "declined" or "protocol_error") AppendConsole(item.Text + "\n");
             }
+            pendingTool?.SetResult("error: Chưa có kết quả xác minh trong lịch sử.", true);
             UpdateWelcome();
             _state.Text = "Đã mở lại cuộc trò chuyện. Bạn có thể tiếp tục yêu cầu.";
         }
-        catch (Exception ex) { _state.Text = "Không đọc được lịch sử: " + ex.Message; }
+        catch (Exception ex)
+        {
+            if (loadVersion == _sessionLoadVersion && workspaceRoot == _tools?.Root)
+                _state.Text = "Không đọc được lịch sử: " + ex.Message;
+        }
     }
 
     private void RefreshTree()
@@ -233,11 +255,18 @@ public sealed partial class AgentWorkspaceControl
 
     private async Task StartOperation(Func<CancellationToken, Task> operation)
     {
-        if (_busy) return;
+        if (_busy || _startingOperation) return;
+        _startingOperation = true;
+        Interlocked.Increment(ref _sessionLoadVersion);
+        _chat.CompletePendingResponse();
+        try
+        {
         if (_tools is null || _session is null) { await PickWorkspace(); if (_tools is null || _session is null) return; }
         if (_dirty) { _state.Text = "Lưu hoặc mở lại file đang chỉnh sửa trước khi chạy agent/lệnh."; return; }
         _cancel = new CancellationTokenSource();
         _computer.BeginTurn();
+        // Screen activation belongs to actual computer tool execution, not
+        // words in a draft or an unrelated manual terminal operation.
         if (_computer.Target is not null && !Muse2Api.Computer.DesktopComputer.RegisterEmergencyStop(Handle))
         {
             DisableComputer(); _cancel.Dispose(); _cancel = null;
@@ -249,6 +278,8 @@ public sealed partial class AgentWorkspaceControl
         SetBusy(true);
         _activeTask = RunOperation(operation, _cancel.Token);
         await _activeTask;
+        }
+        finally { _startingOperation = false; }
     }
 
     private async Task RunOperation(Func<CancellationToken, Task> operation, CancellationToken cancel)
@@ -305,7 +336,8 @@ public sealed partial class AgentWorkspaceControl
     {
         var prompt = _prompt.Text.Trim();
         if (prompt.Length == 0 && _imageDraft.Count == 0) return;
-        if (!await _ensureReady()) return;
+        var localGoalCommand = GoalRun.IsLocalCommand(prompt);
+        if (!localGoalCommand && !await _ensureReady()) return;
         cancel.ThrowIfCancellationRequested();
         var connection = _connection();
         var pastedImages = _imageDraft.Select(image => image.DataUrl).ToList();
@@ -314,20 +346,41 @@ public sealed partial class AgentWorkspaceControl
         // the evidence required to complete it. Vietnamese is in SystemPrompt.
         var model = string.IsNullOrWhiteSpace(_models.Text) ? "muse-chat" : _models.Text.Trim();
         _session!.Model = model;
+        if (GoalRun.IsCommand(prompt) && prompt[5..].Trim() is { Length: > 0 } objective && !localGoalCommand)
+        {
+            _session.Goal = new() { Objective = objective, Summary = "Đã lưu mục tiêu. Nhập /goal để tiếp tục nếu bị gián đoạn." };
+            // Save the objective before the first web request; a host crash must
+            // not erase it. Verification is deliberately fresh on every resume.
+            await _store.SaveAsync(_session, cancel);
+        }
         if (_session.History.Count == 0) _session.Title = prompt[..Math.Min(60, prompt.Length)].Replace('\n', ' ');
         var displayPrompt = prompt + (pastedImages.Count > 0 ? "\n[Đã đính kèm " + pastedImages.Count + " ảnh]" : "");
         _session.Events.Add(new("user", displayPrompt));
-        _chat.AddUserMessage(displayPrompt); _prompt.Clear(); ClearImageDraft(); UpdateWelcome();
+        _chat.AddUserMessage(displayPrompt);
+        // Connecting can take time. Preserve a next-message draft the user
+        // typed while the first request was preparing.
+        if (_prompt.Text.Trim() == prompt || _prompt.Text.Trim().Length == 0) _prompt.Clear();
+        ClearImageDraft(); UpdateWelcome();
         _pendingAssistantText = null;
         _activeThinking = null;
         _activeToolCall = null;
         _activeAssistantCard = null;
         using var client = new AgentClient(connection.BaseUrl, model, connection.ApiKey, _session.Id);
         var loop = new AgentLoop(_tools!, (messages, token) => client.ChatAsync(messages, token, _ => { }),
-            ConfirmTool, Publish);
+            ConfirmTool, Publish) { Goal = _session.Goal, SkillsDirectory = Path.Combine(DesktopDataPaths.Root, "Skills") };
         loop.History.AddRange(_session.History.Select(m => (JsonObject)m.DeepClone()));
-        try { await Task.Run(() => loop.RunAsync(prompt, cancel, pastedImages), cancel); }
-        finally { _session.History = loop.History.Select(m => (JsonObject)m.DeepClone()).ToList(); }
+        var archiveEvents = _session.Events.Take(_session.Events.Count - 1).ToArray();
+        try
+        {
+            await Task.Run(async () =>
+            {
+                cancel.ThrowIfCancellationRequested();
+                ConversationContext.RecoverHistory(loop.History, archiveEvents, _tools!.Root);
+                loop.RetrievedContext = ConversationContext.Recall(archiveEvents, prompt, cancel);
+                await loop.RunAsync(prompt, cancel, pastedImages);
+            }, cancel);
+        }
+        finally { _session.History = loop.History.Select(m => (JsonObject)m.DeepClone()).ToList(); _session.Goal = loop.Goal; }
     }
 
     private async Task RunManualCommand(CancellationToken cancel)
@@ -414,6 +467,14 @@ public sealed partial class AgentWorkspaceControl
         {
             switch (item.Kind)
             {
+                case "goal":
+                    AppendConsole(item.Text + "\n");
+                    _state.Text = "Goal đang chạy — xây dựng, kiểm thử và vá lỗi…";
+                    if (_activeThinking == null) _activeThinking = _chat.AddThinking("Đang thực hiện goal…");
+                    break;
+                case "context_compacted":
+                    AppendConsole(item.Text + "\n");
+                    continue;
                 case "assistant_start":
                     _pendingAssistantText = null;
                     _state.Text = "Đang suy nghĩ…";
@@ -422,7 +483,7 @@ public sealed partial class AgentWorkspaceControl
                 case "assistant_delta":
                     continue;
                 case "assistant":
-                    _pendingAssistantText = ToolCallParser.StripToolBlocks(item.Text);
+                    _pendingAssistantText = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(item.Text));
                     break;
                 case "tool_start":
                     _pendingAssistantText = null;
@@ -445,7 +506,8 @@ public sealed partial class AgentWorkspaceControl
                         _activeToolCall = null;
                     }
                     if (_activeThinking != null)
-                        _activeThinking.AddThought("Hoàn tất.");
+                        _activeThinking.AddThought(ToolOutcome.IsFailure(item.Text) ? "Thao tác chưa thành công — đang kiểm tra kết quả."
+                            : ToolOutcome.IsRunning(item.Text) ? "Tiến trình vẫn đang chạy — cần chờ kết quả." : "Đã nhận kết quả thao tác.");
                     break;
                 case "protocol_error":
                     AppendConsole(item.Text + "\n");
@@ -460,6 +522,7 @@ public sealed partial class AgentWorkspaceControl
                     AppendConsole(item.Text + "\n");
                     _activeThinking?.Complete("Đã dừng do gặp lỗi");
                     _activeThinking = null;
+                    _activeToolCall?.SetResult("error: Lượt xử lý đã dừng trước khi có kết quả.", isError: true);
                     _activeToolCall = null;
                     _activeAssistantCard?.FinalizeStream();
                     _activeAssistantCard = null;
@@ -471,8 +534,14 @@ public sealed partial class AgentWorkspaceControl
                 case "cancelled":
                     _pendingAssistantText = null;
                     AppendConsole(item.Text + "\n");
-                    _activeThinking?.Complete(item.Text);
+                    _activeThinking?.Complete(item.Kind switch
+                    {
+                        "cancelled" => "Đã dừng theo yêu cầu của bạn",
+                        "declined" => "Đã dừng bước chưa được cho phép",
+                        _ => "Chưa hoàn tất — xem kết quả bên dưới",
+                    });
                     _activeThinking = null;
+                    _activeToolCall?.SetResult("error: Lượt xử lý đã dừng trước khi có kết quả.", isError: true);
                     _activeToolCall = null;
                     _activeAssistantCard?.FinalizeStream();
                     _activeAssistantCard = null;
@@ -484,7 +553,8 @@ public sealed partial class AgentWorkspaceControl
                     _activeThinking = null;
                     _activeToolCall = null;
                     ShowPendingAnswer();
-                    _state.Text = _tools?.Changes.Count > 0 ? "Đã hoàn tất. Bấm Thay đổi để xem kết quả hoặc hoàn tác." : "Đã hoàn tất. Bạn có thể hỏi tiếp.";
+                    _state.Text = item.Text != "Hoàn thành lượt chat." ? item.Text
+                        : _tools?.Changes.Count > 0 ? "Đã hoàn tất. Bấm Thay đổi để xem kết quả hoặc hoàn tác." : "Đã hoàn tất. Bạn có thể hỏi tiếp.";
                     break;
                 case "waiting_input":
                     _activeThinking?.Complete("Chờ phản hồi từ bạn");

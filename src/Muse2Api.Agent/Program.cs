@@ -24,13 +24,16 @@ if (opts.Help)
 
         Tùy chọn: --base-url URL --api-key KEY --model NAME
                   --workspace DIR --shell powershell|cmd|bash|auto
-                  --yes (tự duyệt sửa file thường; lệnh và file nhạy cảm vẫn hỏi)
+                  --yes (tự duyệt sửa mã, cấu hình build và chạy lệnh)
                   --max-steps N (tùy chọn; mặc định không giới hạn số bước)
 
         Lệnh trong REPL: /help /exit /clear /model <tên> /workspace <đường dẫn>
-                         /yes (bật/tắt tự xác nhận)
-        Agent chỉ được đọc/ghi file trong workspace, và chỉ chạy lệnh sau khi
-        bạn xác nhận. --yes vẫn yêu cầu duyệt lệnh shell và file nhạy cảm.
+                         /yes (bật/tắt tự xác nhận), /goal <mục tiêu>
+                         /goal status, /goal stop, /goal (tiếp tục)
+        Công cụ file chỉ đọc/ghi trong workspace. --yes tự duyệt lệnh shell;
+        lệnh chạy bằng quyền tài khoản của bạn. Tệp bí mật/chính sách vẫn hỏi.
+        Goal cần test tự động và kiểm chứng giao diện; dùng Muse desktop để
+        cấp quyền cửa sổ và xem trực tiếp màn hình kiểm thử.
         """);
     return 0;
 }
@@ -44,6 +47,7 @@ using var client = new AgentClient(
 var tools = new ToolExecutor(workspace, opts.Shell ?? "auto");
 var autoApprove = opts.Yes;
 var history = new List<JsonObject>();
+GoalRun? goal = null;
 
 Console.WriteLine("muse-agent — agent code chạy trong terminal (kiểu Codex).");
 Console.WriteLine($"  workspace: {tools.Root}");
@@ -67,10 +71,10 @@ while (true)
     if (line is "/exit" or "/quit") break;
     if (line == "/help")
     {
-        Console.WriteLine("  /exit, /clear, /model <tên>, /workspace <đường dẫn>, /yes");
+        Console.WriteLine("  /exit, /clear, /model <tên>, /workspace <đường dẫn>, /yes, /goal <mục tiêu>, /goal status, /goal stop");
         continue;
     }
-    if (line == "/clear") { history.Clear(); Console.WriteLine("  Đã xóa lịch sử chat."); continue; }
+    if (line == "/clear") { history.Clear(); goal = null; Console.WriteLine("  Đã xóa lịch sử chat."); continue; }
     if (line == "/yes") { autoApprove = !autoApprove; Console.WriteLine($"  Tự xác nhận: {(autoApprove ? "bật" : "tắt")}"); continue; }
     if (line.StartsWith("/model ", StringComparison.Ordinal))
     {
@@ -85,6 +89,7 @@ while (true)
             await tools.StopBackgroundProcessesAsync();
             tools = new ToolExecutor(dir, opts.Shell ?? "auto");
             history.Clear();
+            goal = null;
             Console.WriteLine($"  Workspace mới: {tools.Root} (lịch sử chat đã xóa).");
         }
         catch (Exception ex) { Console.WriteLine($"  Lỗi: {ex.Message}"); }
@@ -110,6 +115,7 @@ async Task<bool> RunTaskAsync(string prompt)
         Console.WriteLine,
         opts.MaxSteps);
     loop.History.AddRange(history.Select(m => (JsonObject)m.DeepClone()));
+    loop.Goal = goal;
     bool completed;
     try { completed = await loop.RunAsync(prompt); }
     catch (Exception ex)
@@ -117,6 +123,7 @@ async Task<bool> RunTaskAsync(string prompt)
         Console.Error.WriteLine($"agent> Lỗi: {ex.Message}");
         return false;
     }
+    finally { goal = loop.Goal; }
     history.Clear();
     history.AddRange(loop.History.Select(m => (JsonObject)m.DeepClone()));
     return completed;

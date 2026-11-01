@@ -1,8 +1,8 @@
 namespace Muse2Api.Agent;
 
 /// <summary>
-/// Turbo may automate normal workspace edits, but never silently execute shell
-/// commands or edit secrets and privileged configuration files.
+/// Turbo approves workspace development, including shell/process operations.
+/// Credentials and agent/CI policy files still require explicit review.
 /// </summary>
 public static class TurboApprovalPolicy
 {
@@ -10,7 +10,7 @@ public static class TurboApprovalPolicy
     {
         call = ToolCallParser.Normalize(call);
         if (call.Name is "run_command" or "process_input" or "process_stop")
-            return true;
+            return false;
 
         if (call.Name is not ("write_file" or "edit_file"))
             return false;
@@ -39,13 +39,7 @@ public static class TurboApprovalPolicy
             || name.EndsWith(".pem", StringComparison.OrdinalIgnoreCase)
             || name.EndsWith(".pfx", StringComparison.OrdinalIgnoreCase)
             || name.EndsWith(".p12", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
-            || name.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("global.json", StringComparison.OrdinalIgnoreCase)
             || name.Equals("accounts.json", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("api_key", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("NuGet.Config", StringComparison.OrdinalIgnoreCase);
+            || name.Equals("api_key", StringComparison.OrdinalIgnoreCase);
     }
 }

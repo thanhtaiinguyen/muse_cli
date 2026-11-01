@@ -37,5 +37,13 @@ The WebView2 profile and local conversation histories are not automatically
 covered by these encrypted-file wrappers. The entire local profile should
 be treated as sensitive. Non-Windows gateway storage is not DPAPI-protected.
 
-Turbo may auto-approve normal file edits, but shell commands, process control
-and sensitive file edits still require explicit review. It is not an OS sandbox.
+Turbo auto-approves workspace code/build configuration edits, shell commands
+and process control. Credential files and agent/CI policy edits through file
+tools still require review. Shell commands run with the user's permissions;
+Turbo is not an OS sandbox and shell access can also modify those files.
+Screen access requires selecting a target window once per turn, including
+goal mode. The live preview is local, does not focus windows, does not create
+web requests and stops on revocation/cancellation. Only explicit screenshot
+tool results are attached to model requests. Goal completion requires fresh
+test runner receipts and UI interaction/assertion/capture; it cannot prove
+that every possible defect or untested behavior has been found.

@@ -328,6 +328,48 @@ public class SingleConversationTests
         return output;
     }
 
+    [BrowserFact]
+    public async Task CompactedMemoryReachesTheSameWebChatAfterRestartWithoutExtraSubmissions()
+    {
+        using var dir = new TempDirectory(); var fixture = new WebFixture(); var account = Account();
+        var settings = BrowserSettings(dir.Root);
+        var history = new List<JsonObject> { new() { ["role"] = "user", ["content"] = "Giữ lựa chọn OLD_CONTEXT_SQLITE" } };
+        for (var i = 0; i < 120; i++) history.Add(new() { ["role"] = "assistant", ["content"] = "Lời trao đổi " + i });
+        ConversationContext.Compact(history, dir.Root);
+        var driver = new BrowserDriver(settings); await driver.StartupAsync();
+        async Task Send(int round)
+        {
+            var messages = history.Select(m => (JsonObject)m.DeepClone()).ToList();
+            messages.Add(new() { ["role"] = "user", ["content"] = "Câu hiện tại ROUND_" + round });
+            messages.Add(new() { ["role"] = "user", ["content"] = "APP_STATE:\n" + new JsonObject
+            {
+                ["goal"] = "Câu hiện tại ROUND_" + round,
+                ["conversation_context"] = ConversationContext.Snapshot(messages, dir.Root),
+            }.ToJsonString() });
+            var req = new ChatRequest(Prompt.ForLocalExecutor(messages), "muse-chat", new(), "desktop-chat", Prompt.MessageTurns(messages), default, true);
+            var reply = "";
+            await foreach (var part in driver.ChatStream(account, req)) reply += part;
+            Assert.Contains("fixture done", reply);
+        }
+        try { await fixture.Install(driver, account); await Send(1); await Send(2); }
+        finally { await driver.ShutdownAsync(); }
+        driver = new BrowserDriver(settings); await driver.StartupAsync();
+        try
+        {
+            await fixture.Install(driver, account); await Send(3);
+            Assert.Equal(1, fixture.NewThreads); Assert.Equal(3, fixture.Submissions);
+            Assert.Equal(3, fixture.Prompts.Count);
+            for (var i = 0; i < fixture.Prompts.Count; i++)
+            {
+                Assert.Contains("OLD_CONTEXT_SQLITE", fixture.Prompts[i]);
+                Assert.Contains("ROUND_" + (i + 1), fixture.Prompts[i]);
+                Assert.DoesNotContain("APP_CONTEXT_ARCHIVE", fixture.Prompts[i]);
+                Assert.True(fixture.Prompts[i].Length < 22000);
+            }
+        }
+        finally { await driver.ShutdownAsync(); }
+    }
+
     private sealed class RateDriver : IMuseDriver
     {
         public int Calls; public string Name => "test"; public bool RequiresAccount => true; public DriverCapabilities Capabilities => new(Chat: true);
@@ -340,6 +382,7 @@ public class SingleConversationTests
         public int NewThreads, Submissions, Uploads; public bool RateLimited, RateNotice, SavedUnavailable;
         public string Script = "";
         public string[]? Responses;
+        public List<string> Prompts = new();
         public async Task Install(BrowserDriver driver, Account account)
         {
             var method = typeof(BrowserDriver).GetMethod("GetContext", BindingFlags.NonPublic | BindingFlags.Instance)!;
@@ -350,6 +393,7 @@ public class SingleConversationTests
                 if (path == "/api/attachment") { Uploads++; await route.FulfillAsync(new() { Body = "OK" }); return; }
                 if (path == "/api/chat")
                 {
+                    Prompts.Add(route.Request.PostData ?? "");
                     Submissions++;
                     await route.FulfillAsync(new() { Status = RateLimited ? 429 : 200, ContentType = "text/plain", Body = RateNotice ? "RATE_NOTICE" : Responses is {Length:>0} ? Responses[Math.Min(Submissions-1,Responses.Length-1)] : "{\"status\":\"done\",\"summary\":\"fixture done\"}" }); return;
                 }
@@ -366,7 +410,7 @@ public class SingleConversationTests
                     const saved=JSON.parse(localStorage.getItem(location.pathname)||'[]'); saved.forEach(item=>{userBubble(item.user);bubble(item.text);});
                     document.querySelector('button').onclick=async()=>{
                       if(location.pathname==='/thread/new') history.replaceState({},'', '/thread/fixture-1');
-                      const submitted=box.value;userBubble(submitted);box.value=''; const response=await fetch('/api/chat',{method:'POST'});
+                      const submitted=box.value;userBubble(submitted);box.value=''; const response=await fetch('/api/chat',{method:'POST',body:submitted});
                       if(!response.ok)return; const text=await response.text();
                       if(text==='RATE_NOTICE'){const alert=document.createElement('div');alert.setAttribute('role','alert');alert.textContent='Too many requests. Rate limit exceeded.';document.body.append(alert);return;}
                       bubble(text);

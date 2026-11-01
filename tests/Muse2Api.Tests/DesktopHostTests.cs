@@ -88,6 +88,48 @@ public class DesktopHostTests
         Assert.NotNull(retry.BaseUrl);
     }
 
+    [Fact]
+    public async Task MultipleAccounts_StayEnabledTogether_AndCreatedKeyAuthenticates()
+    {
+        using var directory = new TempDirectory();
+        var profile = DesktopProfile.Create(directory.Root, browserPath: "");
+        await using var host = new DesktopGatewayHost(profile, new MockDriver(0));
+        await host.StartAsync();
+        using var http = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(host.BaseUrl!) };
+        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", host.ApiKey);
+        string? firstId = null, secondId = null;
+        foreach (var (label, session) in new[] { ("TK 1", "sess-a"), ("TK 2", "sess-b") })
+        {
+            using var response = await http.PostAsync("/admin/accounts", new StringContent($"{{\"label\":\"{label}\",\"cookies\":{{\"hatch_sess\":\"{session}\",\"hatch_native_auth_device\":\"dev-{session}\"}}}}", Encoding.UTF8, "application/json"));
+            response.EnsureSuccessStatusCode();
+            var id = JsonNode.Parse(await response.Content.ReadAsStringAsync())!["account"]!["id"]!.ToString();
+            if (firstId is null) firstId = id; else secondId = id;
+        }
+        Assert.NotEqual(firstId, secondId);
+        Assert.Equal(2, host.State.Pool.All().Count);
+        Assert.All(host.State.Pool.All(), account => Assert.True(account.Enabled));
+        using (var patchOff = await http.PatchAsync($"/admin/accounts/{firstId}", new StringContent("{\"enabled\":false}", Encoding.UTF8, "application/json")))
+        {
+            patchOff.EnsureSuccessStatusCode();
+            Assert.False(host.State.Pool.Get(firstId!)!.Enabled);
+            Assert.True(host.State.Pool.Get(secondId!)!.Enabled);
+        }
+        using (var patchOn = await http.PatchAsync($"/admin/accounts/{firstId}", new StringContent("{\"enabled\":true}", Encoding.UTF8, "application/json")))
+        {
+            patchOn.EnsureSuccessStatusCode();
+            Assert.True(host.State.Pool.Get(firstId!)!.Enabled);
+        }
+        using (var created = await http.PostAsync("/admin/keys", new StringContent("{\"name\":\"key phụ\"}", Encoding.UTF8, "application/json")))
+            created.EnsureSuccessStatusCode();
+        var (_, plainKey) = host.State.Keys.Create("kiểm thử", "");
+        using var keyHttp = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(host.BaseUrl!) };
+        keyHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", plainKey);
+        Assert.Equal(HttpStatusCode.OK, (await keyHttp.GetAsync("/v1/models")).StatusCode);
+        using var wrongHttp = new HttpClient(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(host.BaseUrl!) };
+        wrongHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "m2a-sai-key");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await wrongHttp.GetAsync("/v1/models")).StatusCode);
+    }
+
     private sealed class BrokenStartup : IMuseDriver
     {
         public string Name => "broken";

@@ -91,9 +91,11 @@ public sealed class AgentClient : IDisposable
           prefer waiting over sending rapid repeated polls), process_input
           {process_id,text,newline:true} for stdin, and process_stop {process_id}
           when finished. A background start is not proof that a test passed.
-        - Desktop UI tools work ONLY in the window the user has selected via
-          Màn hình. If the desktop can request authorization, use computer_inspect
-          to open its window chooser; otherwise ask them to select the window.
+        - Desktop UI tools work ONLY in the authorized window. The desktop
+          auto-selects the foreground window (or the topmost one when Muse
+          itself is in front) as soon as you call computer_inspect; the Màn
+          hình chooser opens only when no window can be auto-selected, or
+          when the user wants a different window than the auto-selected one.
           Never use shell scripts to bypass this boundary.
           computer_inspect {} returns current element_id, name, value, role,
           patterns and bounds. computer_screenshot {} returns a real image.
@@ -106,6 +108,16 @@ public sealed class AgentClient : IDisposable
           computer_select {element_id} selects an exposed list/menu option.
           computer_click {snapshot_id,x,y} requires a fresh screenshot; x/y
           use that image's pixels. IDs expire; inspect again if UI changed.
+          computer_click also accepts button="right" and double_click=true.
+          computer_drag {snapshot_id,x,y,to_x,to_y} drags inside the selected scope.
+          computer_scroll accepts left/right/up/down and an element_id, or a fresh
+          snapshot_id with x,y for mouse-wheel fallback.
+          computer_focus {element_id?} focuses an authorized target.
+          computer_inspect supports query/offset/limit/max_depth/element_id for large trees.
+          Each inspect replaces element IDs; every UI mutation invalidates the screenshot.
+          UIA bounds are physical pixels; multiply by screenshot image_scale to get image pixels.
+          computer_type may omit element_id after a screenshot click, but the focused element
+          must be inside the authorized window, never a password input.
           computer_assert {element_id,property:"name"|"value"|"toggle",
           expected:"...",match:"contains"|"equals"} verifies observed state.
           After every action inspect/capture the result. Report a UI test as

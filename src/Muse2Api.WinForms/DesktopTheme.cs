@@ -38,6 +38,7 @@ internal static class DesktopTheme
     public static Color Accent => Current.Accent;
     public static Color Success => Current.Success;
     public static Color UserBackground => Current.UserBackground;
+    public static Color UserText => Mode == ThemeMode.Light ? Current.Text : Color.White;
     public static Color UserBorder => Current.UserBorder;
     public static Color Notice => Current.Notice;
     public static Color Folder => Current.Folder;

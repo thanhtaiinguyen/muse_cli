@@ -5,6 +5,22 @@ namespace Muse2Api.Tests;
 
 public class PlannerTransportTests
 {
+    [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public void GoalContractAndFreshMissingChecksReachTheWebInEveryPromptForm(bool compact)
+    {
+        var state=new JsonObject { ["goal"]="Thêm ô tìm kiếm", ["goal_mode"]=new JsonObject {
+            ["objective"]="Thêm ô tìm kiếm", ["instructions"]=GoalRun.Instructions,
+            ["verification"]=new GoalVerification().Snapshot() } };
+        var prompt=Prompt.ForLocalExecutor(new List<JsonObject> {
+            new(){["role"]="assistant",["content"]="[Unverified reply: goal checks are still missing.]\nUnproven done claim"},
+            new(){["role"]="user",["content"]="APP_STATE:\n"+state.ToJsonString(new System.Text.Json.JsonSerializerOptions {Encoder=System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping})},
+        },compact);
+        Assert.Contains("goal_mode",prompt);Assert.Contains("verification.missing",prompt);
+        Assert.Contains("Thêm ô tìm kiếm",prompt);Assert.Contains("GOAL MODE",prompt);
+        Assert.Contains("computer_assert",prompt);Assert.DoesNotContain("Unproven done claim",prompt);
+    }
+
     [Fact]
     public void LocalPlanner_UsesTaskDataInsteadOfImpersonatingAPastedConversation()
     {

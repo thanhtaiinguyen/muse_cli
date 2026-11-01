@@ -39,7 +39,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private readonly TreeView _tree = new() { Dock = DockStyle.Fill, HideSelection = false, BorderStyle = BorderStyle.None, ShowLines = false, ItemHeight = 28 };
     private readonly RichTextBox _editor = CodeBox(false), _diff = CodeBox(true), _console = CodeBox(true);
     private readonly ChatTranscript _chat = new();
-    private readonly ChatInputBox _prompt = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.None, AcceptsReturn = true, BorderStyle = BorderStyle.None, PlaceholderText = "Mô tả điều bạn muốn làm… hoặc Ctrl+V để dán ảnh" };
+    private readonly ChatInputBox _prompt = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.None, AcceptsReturn = true, BorderStyle = BorderStyle.None, PlaceholderText = "Nhập yêu cầu hoặc /goal kèm mục tiêu… Ctrl+V để dán ảnh" };
     private readonly CleanButton _pasteImage = new() { Text = "Dán ảnh", Width = 96, Quiet = true, AccessibleName = "Dán ảnh từ clipboard" };
     private readonly TextBox _command = new() { Dock = DockStyle.Fill, PlaceholderText = "Nhập lệnh nếu bạn muốn tự chạy…" };
     private readonly ListBox _sessions = new() { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 48, IntegralHeight = false };
@@ -75,12 +75,13 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _shell.Items.AddRange(new object[] { "powershell", "cmd", "bash" }); _shell.SelectedIndex = 0;
         _terminalShell.Items.AddRange(new object[] { "PowerShell", "CMD", "Bash" }); _terminalShell.SelectedIndex = 0;
         _terminalShell.SelectedIndexChanged += (_, _) => { if (!_busy) _shell.SelectedIndex = _terminalShell.SelectedIndex; };
-        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — hỏi trước khi chạy lệnh" }); _permissions.SelectedIndex = 0;
+        _permissions.Items.AddRange(new object[] { "Hỏi trước khi thay đổi", "Chỉ xem dự án", "Turbo — tự sửa mã và chạy lệnh" }); _permissions.SelectedIndex = 0;
         _timer.Tick += async (_, _) =>
         {
             DrainEvents();
             if (_busy && ++_activityFrame % 2 == 0) _activityGlyph.Text = new[] { "◐", "◓", "◑", "◒" }[(_activityFrame / 2) % 4];
             await PollManualProcess();
+            await PollScreenPreview();
         }; _timer.Start();
         _stopBackground.Click += async (_, _) => { try { await StopTerminalProcesses(); } catch (Exception ex) { _state.Text = ex.Message; } };
         _choose.Click += async (_, _) => await PickWorkspace();
@@ -91,7 +92,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _send.Click += async (_, _) => await StartOperation(RunTurn);
         _prompt.PasteImage = PasteChatImages;
         _pasteImage.Click += (_, _) => { if (!PasteChatImages()) _state.Text = "Chụp màn hình rồi nhấn Ctrl+V trong ô chat để đính kèm ảnh."; };
-        _stop.Click += (_, _) => { _state.Text = "Đang dừng thao tác…"; _cancel?.Cancel(); };
+        _stop.Click += (_, _) => { _state.Text = "Đang dừng thao tác…"; _cancel?.Cancel(); DisableComputer(); };
         _run.Click += async (_, _) => await StartOperation(RunManualCommand);
         _save.Click += async (_, _) => await SaveEditor();
         _undo.Click += async (_, _) => await UndoSelected();
@@ -335,7 +336,8 @@ public sealed partial class AgentWorkspaceControl : UserControl
         input.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); input.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76)); input.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
         input.Controls.Add(_command, 0, 0); input.Controls.Add(_run, 1, 0); input.Controls.Add(_stopBackground, 2, 0);
         terminal.Controls.Add(input, 0, 3); terminalTab.Controls.Add(terminal);
-        _detailTabs.AddPage("Tệp", editorTab, WorkspaceIcon.Files); _detailTabs.AddPage("Thay đổi", changesTab, WorkspaceIcon.Changes); _detailTabs.AddPage("Terminal", terminalTab, WorkspaceIcon.Terminal); panel.Controls.Add(_detailTabs, 0, 1);
+        _detailTabs.AddPage("Tệp", editorTab, WorkspaceIcon.Files); _detailTabs.AddPage("Thay đổi", changesTab, WorkspaceIcon.Changes); _detailTabs.AddPage("Terminal", terminalTab, WorkspaceIcon.Terminal);
+        _detailTabs.AddPage("Màn hình", BuildScreenPreview(), WorkspaceIcon.Monitor); panel.Controls.Add(_detailTabs, 0, 1);
         DesktopTheme.Apply(panel); return panel;
     }
 
@@ -397,7 +399,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private void Publish(AgentEvent item) { if (_events.Count < 1000 || item.Kind != "command_output") _events.Enqueue(item); }
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _cancel?.Cancel(); DisableComputer(); _timer.Dispose(); _tips.Dispose(); }
+        if (disposing) { _cancel?.Cancel(); DisableComputer(); _computer.Dispose(); _timer.Dispose(); _tips.Dispose(); }
         base.Dispose(disposing);
     }
 }

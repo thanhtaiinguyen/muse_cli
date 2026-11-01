@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using System.Text.RegularExpressions;
+using Muse2Api.Agent;
 
 namespace Muse2Api.WinForms;
 
@@ -50,6 +51,8 @@ public sealed class ChatTranscript : UserControl
         foreach (var card in _cards) card.RefreshTheme();
         Invalidate();
     }
+
+    public void CompletePendingResponse() => _cards.OfType<ChatMessageCard>().LastOrDefault(card => !card.IsUser)?.FinalizeStream();
 
     private void ThemeChanged(object? sender, EventArgs e) => RefreshTheme();
 
@@ -422,10 +425,11 @@ public sealed class ToolCallCard : ChatCard
 
     public void SetResult(string result, bool isError)
     {
+        var running = !isError && ToolOutcome.IsRunning(result);
         _hasError = isError;
-        _status.ForeColor = isError ? DesktopTheme.Notice : DesktopTheme.Success;
-        _status.Text = isError ? "✕ Thất bại" : "✓ Hoàn tất";
-        _title.Text = FormatToolSummary(_tool, _path, _detail, running: false);
+        _status.ForeColor = isError ? DesktopTheme.Notice : running ? DesktopTheme.Muted : DesktopTheme.Success;
+        _status.Text = isError ? "✕ Thất bại" : running ? "◐ Đang chạy nền" : "✓ Hoàn tất";
+        _title.Text = FormatToolSummary(_tool, _path, _detail, running);
         _title.ForeColor = isError ? DesktopTheme.Notice : DesktopTheme.Text;
         RefreshHeight();
     }
@@ -467,7 +471,7 @@ public sealed class ToolCallCard : ChatCard
         _icon.SetBounds(8, (Height - iconSize) / 2, iconSize, iconSize);
 
         var terminalWidth = (int)(95 * scale);
-        var statusWidth = (int)(75 * scale);
+        var statusWidth = Math.Max((int)(75 * scale), TextRenderer.MeasureText(_status.Text, _status.Font).Width + 8);
         _viewTerminal.SetBounds(Math.Max(10, Width - terminalWidth - 8), 0, terminalWidth, Height);
         _status.SetBounds(Math.Max(10, _viewTerminal.Left - statusWidth - 4), 0, statusWidth, Height);
 
@@ -599,7 +603,7 @@ public sealed class ChatMessageCard : ChatCard
     private readonly System.Windows.Forms.Timer _copyFeedbackTimer = new() { Interval = 1500 };
     private string _source = "";
     private int _contentHeight = 24;
-    private bool _formatting, _resizing, _streaming;
+    private bool _formatting, _resizing, _streaming, _streamComplete;
     private int _calculatedHeight = 36;
 
     public bool IsUser { get; }
@@ -613,7 +617,7 @@ public sealed class ChatMessageCard : ChatCard
         BackColor = IsUser ? DesktopTheme.UserBackground : DesktopTheme.Background;
 
         _body.BackColor = BackColor;
-        _body.ForeColor = IsUser ? Color.White : DesktopTheme.Text;
+        _body.ForeColor = IsUser ? DesktopTheme.UserText : DesktopTheme.Text;
         _copy.ForeColor = DesktopTheme.Muted;
         _copy.BackColor = BackColor;
         _copy.Visible = !IsUser;
@@ -651,6 +655,9 @@ public sealed class ChatMessageCard : ChatCard
         if (stream && !IsUser && text.Length > 0)
         {
             StartStream(text);
+            // This constructor receives a complete answer; animate its display
+            // and stop the timer/cursor when the last character has appeared.
+            _streamComplete = true;
         }
         else
         {
@@ -669,6 +676,7 @@ public sealed class ChatMessageCard : ChatCard
     public void StartStream(string initialText)
     {
         _streaming = true;
+        _streamComplete = false;
         _source = initialText;
         _streamQueue.Clear();
         foreach (var ch in initialText) _streamQueue.Enqueue(ch);
@@ -719,7 +727,8 @@ public sealed class ChatMessageCard : ChatCard
     {
         if (_streamQueue.Count == 0)
         {
-            if (!_streaming) _streamTimer.Stop();
+            if (_streamComplete) FinalizeStream();
+            else if (!_streaming) _streamTimer.Stop();
             return;
         }
 
@@ -743,7 +752,7 @@ public sealed class ChatMessageCard : ChatCard
 
         RefreshHeight();
 
-        if (_streamQueue.Count == 0 && !_streaming)
+        if (_streamQueue.Count == 0 && (_streamComplete || !_streaming))
         {
             FinalizeStream();
         }
@@ -766,7 +775,7 @@ public sealed class ChatMessageCard : ChatCard
             var bold = !code && Regex.IsMatch(visible, @"\*\*.+?\*\*");
             if (!code) visible = Regex.Replace(visible, @"\*\*(.+?)\*\*", "$1");
             _body.SelectionFont = code ? DesktopTheme.Code : heading || bold ? DesktopTheme.Strong : _body.Font;
-            _body.SelectionColor = IsUser ? Color.White : DesktopTheme.Text;
+            _body.SelectionColor = IsUser ? DesktopTheme.UserText : DesktopTheme.Text;
             _body.SelectionBackColor = code ? DesktopTheme.SurfaceStrong : BackColor;
             _body.AppendText(visible + "\n");
         }
@@ -823,10 +832,19 @@ public sealed class ChatMessageCard : ChatCard
     {
         BackColor = IsUser ? DesktopTheme.UserBackground : DesktopTheme.Background;
         _body.BackColor = BackColor;
-        _body.ForeColor = IsUser ? Color.White : DesktopTheme.Text;
+        _body.ForeColor = IsUser ? DesktopTheme.UserText : DesktopTheme.Text;
         _copy.ForeColor = DesktopTheme.Muted;
         _copy.BackColor = BackColor;
-        SetText(_source, force: true);
+        if (_streaming)
+        {
+            // Recolor only the visible portion; inserting the whole source
+            // here would duplicate the characters still queued for animation.
+            _body.SelectAll();
+            _body.SelectionColor = DesktopTheme.Text;
+            _body.SelectionBackColor = BackColor;
+            _body.Select(_body.TextLength, 0);
+        }
+        else SetText(_source, force: true);
         UpdateRegion();
         Invalidate();
     }

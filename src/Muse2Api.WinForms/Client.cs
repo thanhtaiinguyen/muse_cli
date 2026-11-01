@@ -78,20 +78,58 @@ public sealed class GatewayClient : IDisposable
         });
 
     /// <summary>Accounts the gateway knows, masked by the gateway itself.
-    /// Returns (id, label, status) triples in gateway order.</summary>
-    public async Task<List<(string Id, string Label, string Status)>> ListAccounts(string url, string adminKey)
+    /// Returns (id, label, status, enabled) in gateway order. Every enabled
+    /// account serves traffic at the same time (the pool schedules them).</summary>
+    public async Task<List<(string Id, string Label, string Status, bool Enabled)>> ListAccounts(string url, string adminKey)
     {
         var body = await Request(url + "/admin/accounts", adminKey);
-        var list = new List<(string, string, string)>();
+        var list = new List<(string, string, string, bool)>();
         if (body?["data"] is JsonArray arr)
             foreach (var a in arr)
                 if (a is JsonObject o)
                     list.Add((
                         o["id"]?.GetValue<string>() ?? "",
                         o["label"]?.GetValue<string>() ?? "",
-                        o["status"]?.GetValue<string>() ?? ""));
+                        o["status"]?.GetValue<string>() ?? "",
+                        o["enabled"] is JsonValue enabled && enabled.TryGetValue<bool>(out var on) ? on : true));
         return list;
     }
+
+    public Task<JsonNode?> SetAccountEnabled(string url, string adminKey, string accountId, bool enabled)
+        => Request(url + $"/admin/accounts/{accountId}", adminKey, new JsonObject { ["enabled"] = enabled }, HttpMethod.Patch);
+
+    public Task<JsonNode?> DeleteAccount(string url, string adminKey, string accountId)
+        => Request(url + $"/admin/accounts/{accountId}", adminKey, null, HttpMethod.Delete);
+
+    /// <summary>API keys created on the gateway (not the built-in desktop key).
+    /// Plaintext is only ever returned once, by CreateKey.</summary>
+    public async Task<List<(string Id, string Name, string Prefix, bool Revoked)>> ListKeys(string url, string adminKey)
+    {
+        var body = await Request(url + "/admin/keys", adminKey);
+        var list = new List<(string, string, string, bool)>();
+        if (body?["data"] is JsonArray arr)
+            foreach (var k in arr)
+                if (k is JsonObject o)
+                    list.Add((
+                        o["id"]?.GetValue<string>() ?? "",
+                        o["name"]?.GetValue<string>() ?? "",
+                        o["prefix"]?.GetValue<string>() ?? "",
+                        o["revoked"] is JsonValue revoked && revoked.TryGetValue<bool>(out var off) && off));
+        return list;
+    }
+
+    public async Task<string> CreateKey(string url, string adminKey, string name)
+    {
+        var body = await Request(url + "/admin/keys", adminKey, new JsonObject { ["name"] = name });
+        return body?["api_key"]?.GetValue<string>()
+            ?? throw new Exception("Gateway không trả về API key mới.");
+    }
+
+    public Task<JsonNode?> RevokeKey(string url, string adminKey, string keyId, bool revoked = true)
+        => Request(url + $"/admin/keys/{keyId}", adminKey, new JsonObject { ["revoked"] = revoked }, HttpMethod.Patch);
+
+    public Task<JsonNode?> DeleteKey(string url, string adminKey, string keyId)
+        => Request(url + $"/admin/keys/{keyId}", adminKey, null, HttpMethod.Delete);
 
     public Task<JsonNode?> GetQuota(string url, string adminKey, string accountId)
         => Request(url + $"/admin/accounts/{accountId}/quota", adminKey);

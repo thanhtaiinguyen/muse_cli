@@ -18,7 +18,7 @@ public static class ToolCallParser
     };
     private static readonly HashSet<string> Names = new(StringComparer.Ordinal)
         { "read_file", "read_files", "list_files", "search_files", "write_file", "edit_file", "run_command", "process_status", "process_input", "process_stop", "git_status", "git_diff",
-          "computer_list_windows", "computer_inspect", "computer_screenshot", "computer_click", "computer_type", "computer_key", "computer_scroll", "computer_invoke", "computer_set_value", "computer_focus", "computer_assert", "computer_toggle", "computer_select", "computer_expand" };
+          "computer_list_windows", "computer_inspect", "computer_screenshot", "computer_click", "computer_drag", "computer_type", "computer_key", "computer_scroll", "computer_invoke", "computer_set_value", "computer_focus", "computer_assert", "computer_toggle", "computer_select", "computer_expand" };
 
     public static ToolCall Normalize(ToolCall call)
     {
@@ -98,6 +98,19 @@ public static class ToolCallParser
         return text;
     }
 
+    public static bool NeedsInput(string text)
+    {
+        foreach (var candidate in Fences.Matches(text).Select(m => m.Groups["body"].Value).Prepend(text.Trim()))
+        {
+            try
+            {
+                if (JsonNode.Parse(candidate) is JsonObject obj && obj["status"]?.ToString() == "needs_input") return true;
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException) { }
+        }
+        return LocalTaskIntent.IsClarification(PlannerReply(StripToolBlocks(text)));
+    }
+
     private static void Extract(JsonNode? node, List<ToolCall> calls, bool explicitTool)
     {
         if (node is JsonArray array)
@@ -106,6 +119,13 @@ public static class ToolCallParser
             return;
         }
         if (node is not JsonObject obj) { if (explicitTool) calls.Add(ParseError("Tool must be a JSON object")); return; }
+        if (obj["status"]?.ToString() == "needs_input" &&
+            ((obj["reply"] ?? obj["summary"]) is not JsonValue question || !question.TryGetValue<string>(out var questionText) || string.IsNullOrWhiteSpace(questionText)))
+        { calls.Add(ParseError("needs_input requires a non-empty question in summary or reply.")); return; }
+        if (obj["status"]?.ToString() == "needs_input" &&
+            (obj["actions"] is JsonArray pendingActions && pendingActions.Count > 0
+            || obj["tool_calls"] is JsonArray pendingCalls && pendingCalls.Count > 0))
+        { calls.Add(ParseError("needs_input cannot contain actions. Ask for input OR request local operations, not both.")); return; }
         if (obj.ContainsKey("actions") && obj.ContainsKey("tool_calls"))
         { calls.Add(ParseError("Use one actions or tool_calls envelope, not both. No actions were executed.")); return; }
         if (obj.ContainsKey("actions") && obj["actions"] is not JsonArray
@@ -123,7 +143,7 @@ public static class ToolCallParser
                     "replace_text" => "edit_file", "save_text" => "write_file", "terminal" => "run_command", "poll_process" => "process_status",
                     "send_process_input" => "process_input", "stop_process" => "process_stop", "ui_tree" => "computer_inspect", "ui_image" => "computer_screenshot",
                     "ui_press" => "computer_invoke", "ui_fill" => "computer_set_value", "ui_type" => "computer_type", "ui_key" => "computer_key",
-                    "ui_click" => "computer_click", "ui_scroll" => "computer_scroll", "ui_assert" => "computer_assert", "ui_toggle" => "computer_toggle",
+                    "ui_click" => "computer_click", "ui_drag" => "computer_drag", "ui_focus" => "computer_focus", "ui_scroll" => "computer_scroll", "ui_assert" => "computer_assert", "ui_toggle" => "computer_toggle",
                     "ui_select" => "computer_select", "ui_expand" => "computer_expand", _ => "__unknown_action__",
                 };
                 if (actionTool == "__unknown_action__") { calls.Add(ParseError("Unknown application action: " + operation)); continue; }
