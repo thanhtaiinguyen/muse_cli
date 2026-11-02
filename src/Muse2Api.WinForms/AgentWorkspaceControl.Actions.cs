@@ -383,6 +383,7 @@ public sealed partial class AgentWorkspaceControl
         _activeThinking = null;
         _activeToolCall = null;
         _activeAssistantCard = null;
+        _activeReviewCard = null;
         using var client = new AgentClient(connection.BaseUrl, model, connection.ApiKey, _session.Id);
         var loop = new AgentLoop(_tools!, (messages, token) => client.ChatAsync(messages, token, _ => { }),
             ConfirmTool, Publish) { Goal = _session.Goal, Review = _session.Review, ProjectReviewEnabled = _projectReviewEnabled,
@@ -513,6 +514,19 @@ public sealed partial class AgentWorkspaceControl
                     AppendConsole(item.Text + "\n"); _state.Text = item.Text;
                     if (_activeThinking is null) _activeThinking = _chat.AddThinking(item.Text);
                     else _activeThinking.AddThought(item.Text);
+                    break;
+                case "review_switch":
+                    AppendConsole("\n🔍 " + item.Text + "\n");
+                    _state.Text = "Phản biện dự án: Đang đọc lại mã nguồn để thẩm định…";
+                    _activeReviewCard = _chat.AddReviewCard("Đang đọc lại mã nguồn và đối chiếu tiêu chí chất lượng…", "reviewing");
+                    break;
+                case "review_verdict":
+                    AppendConsole("\n🔍 " + item.Text + "\n");
+                    _state.Text = item.Text;
+                    if (_activeReviewCard is null)
+                        _activeReviewCard = _chat.AddReviewCard(item.Text, item.Tool ?? "reviewing");
+                    else
+                        _activeReviewCard.SetVerdict(item.Tool ?? "reviewing", item.Text, _session?.Review?.Findings);
                     break;
                 case "context_compacted":
                     AppendConsole(item.Text + "\n");

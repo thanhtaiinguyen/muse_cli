@@ -26,6 +26,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private ThinkingCard? _activeThinking;
     private ToolCallCard? _activeToolCall;
     private ChatMessageCard? _activeAssistantCard;
+    private ReviewCard? _activeReviewCard;
     private int _activityFrame;
     private readonly ToolTip _tips = new();
 
@@ -39,14 +40,14 @@ public sealed partial class AgentWorkspaceControl : UserControl
     private readonly TreeView _tree = new() { Dock = DockStyle.Fill, HideSelection = false, BorderStyle = BorderStyle.None, ShowLines = false, ItemHeight = 28 };
     private readonly RichTextBox _editor = CodeBox(false), _diff = CodeBox(true), _console = CodeBox(true);
     private readonly ChatTranscript _chat = new();
-    private readonly ChatInputBox _prompt = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.None, AcceptsReturn = true, BorderStyle = BorderStyle.None, PlaceholderText = "Nhập yêu cầu hoặc /goal kèm mục tiêu… Ctrl+V để dán ảnh" };
-    private readonly CleanButton _pasteImage = new() { Text = "Dán ảnh", Width = 96, Quiet = true, AccessibleName = "Dán ảnh từ clipboard" };
+    private readonly ChatInputBox _prompt = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.None, AcceptsReturn = true, BorderStyle = BorderStyle.None, PlaceholderText = "Nhập yêu cầu hoặc /goal kèm mục tiêu… (Enter để gửi, Shift+Enter xuống dòng)" };
+    private readonly CleanButton _pasteImage = new() { Text = "Ảnh", Icon = WorkspaceIcon.Plus, Width = 68, Height = 34, Quiet = true, AccessibleName = "Dán ảnh từ clipboard" };
     private readonly TextBox _command = new() { Dock = DockStyle.Fill, PlaceholderText = "Nhập lệnh nếu bạn muốn tự chạy…" };
     private readonly ListBox _sessions = new() { Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 48, IntegralHeight = false };
     // Advanced preferences are intentionally kept out of the main workspace.
     private readonly ComboBox _models = new() { Text = "muse-chat" }, _shell = new() { DropDownStyle = ComboBoxStyle.DropDownList }, _permissions = new() { DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ListBox _changes = new() { Dock = DockStyle.Fill, DisplayMember = nameof(WorkspaceChange.Path), BorderStyle = BorderStyle.None, IntegralHeight = false, ItemHeight = 28 };
-    private readonly CleanButton _send = new() { Text = "Gửi", Icon = WorkspaceIcon.Send, Primary = true, Width = 108 }, _stop = new() { Text = "Dừng", Icon = WorkspaceIcon.Stop, Width = 96, Visible = false };
+    private readonly CleanButton _send = new() { Text = "", Icon = WorkspaceIcon.Send, Primary = true, Circle = true, Size = new Size(34, 34), AccessibleName = "Gửi tin nhắn" }, _stop = new() { Text = "", Icon = WorkspaceIcon.Stop, Circle = true, Size = new Size(34, 34), Visible = false, AccessibleName = "Dừng xử lý" };
     private readonly CleanButton _save = new() { Text = "Lưu tệp", Width = 100 }, _undo = new() { Text = "Hoàn tác tệp này", Width = 160 };
     private readonly CleanButton _choose = new() { Text = "Chọn dự án…", Icon = WorkspaceIcon.Folder, Dock = DockStyle.Fill }, _new = new() { Text = "Cuộc trò chuyện mới", Icon = WorkspaceIcon.Plus, Primary = true, Dock = DockStyle.Fill };
     private readonly CleanButton _loginButton = new() { Text = "Kết nối Muse", Primary = true, Width = 150 };
@@ -248,13 +249,19 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _prompt.Enter += (_, _) => { composer.FocusHighlight = true; composer.Invalidate(); };
         _prompt.Leave += (_, _) => { composer.FocusHighlight = false; composer.Invalidate(); };
 
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
         footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 42));
+
+        _pasteImage.Dock = DockStyle.Fill;
+        _pasteImage.Margin = new Padding(0, 3, 4, 3);
+        footer.Controls.Add(_pasteImage, 0, 0);
 
         var statusHost = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
         statusHost.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        statusHost.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 24));
+        statusHost.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
         statusHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         _state.AutoEllipsis = true;
         _state.Font = DesktopTheme.Small;
@@ -262,27 +269,17 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _state.TextChanged += (_, _) => _tips.SetToolTip(_state, _state.Text);
         statusHost.Controls.Add(_activityGlyph, 0, 0);
         statusHost.Controls.Add(_state, 1, 0);
-        footer.Controls.Add(statusHost, 0, 0);
-
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, BackColor = DesktopTheme.Surface, Margin = Padding.Empty };
-        actions.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 102));
-        actions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 114));
-
-        _pasteImage.Dock = DockStyle.Fill;
-        _pasteImage.Margin = new Padding(2);
-        actions.Controls.Add(_pasteImage, 0, 0);
+        footer.Controls.Add(statusHost, 1, 0);
 
         var sendStopHost = new Panel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Color.Transparent };
-        _send.Dock = DockStyle.Fill;
-        _send.Margin = new Padding(2);
-        _stop.Dock = DockStyle.Fill;
-        _stop.Margin = new Padding(2);
+        _send.Location = new Point(4, 3);
+        _send.Size = new Size(34, 34);
+        _stop.Location = new Point(4, 3);
+        _stop.Size = new Size(34, 34);
         sendStopHost.Controls.Add(_send);
         sendStopHost.Controls.Add(_stop);
-        actions.Controls.Add(sendStopHost, 1, 0);
+        footer.Controls.Add(sendStopHost, 2, 0);
 
-        footer.Controls.Add(actions, 1, 0);
         composer.Controls.Add(footer, 0, 2);
 
         void CenterComposer()

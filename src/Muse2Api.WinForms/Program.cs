@@ -45,7 +45,8 @@ internal static class Program
             var tool2 = transcript.AddToolCall("run_command", null, "dotnet test tests/Muse2Api.Tests/Muse2Api.Tests.csproj");
             tool2.SetResult("Passed! - Failed: 0, Passed: 196, Skipped: 7", isError: false);
 
-            transcript.AddAssistantMessage("Tôi đã nâng cấp giao diện theo phong cách Codex hiện đại:\n- **Khối Thinking:** Hiển thị thời gian và các bước suy nghĩ có thể thu gọn.\n- **Hội thoại Tool:** Tương tác giữa Muse và công cụ được biểu diễn qua thẻ trực quan (đọc tệp, sửa code, chạy lệnh).\n- **Nhả chữ (Typewriter):** Phản hồi mượt mà theo thời gian thực.\n- **Không chồng chéo:** Các nút và bảng điều khiển được căn lề chuẩn xác, không còn lỗi bóng chữ.", stream: false);
+            transcript.AddAssistantMessage("Tôi đã nâng cấp giao diện theo phong cách ChatGPT hiện đại và tinh gọn:\n- **Bong bóng chat người dùng:** Thiết kế bo tròn mềm mại chuẩn màu xám than ChatGPT, êm dịu không chói mắt.\n- **Khung nhập tin nhắn:** Nút gửi hình tròn sang trọng, nút đính kèm ảnh gọn gàng, bố cục thanh thoát.\n- **Tách bạch 2 vai trò:** Vai trò Coder và vai trò Phản biện dự án hiển thị độc lập và trực quan trên giao diện.", stream: false);
+            transcript.AddReviewCard("Đã kiểm tra độc lập mã nguồn giao diện và tính năng phản biện 2 vai trò. Các tiêu chí chấp nhận và kiểm thử đều đã đạt.", "approved");
 
             form.Size = new Size(1000, 720);
             transcript.Reflow();

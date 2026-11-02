@@ -91,7 +91,8 @@ public sealed class AgentLoop
             {
                 if (verification is null && Review is { Phase: not "accepted" } savedReview && WorkflowPolicy.IsContinue(userPrompt))
                     prompt = savedReview.Objective;
-                if (verification is not null || LocalTaskIntent.Required(prompt).HasFlag(LocalWork.Edit))
+                if (!WorkflowPolicy.IsSmallTalk(prompt) && !WorkflowPolicy.IsExplanation(prompt)
+                    && (verification is not null || LocalTaskIntent.Required(prompt).HasFlag(LocalWork.Edit) || LocalTaskIntent.Required(prompt).HasFlag(LocalWork.Read) || prompt.Trim().Length > 0))
                 {
                     var objective = Goal is not null && verification is not null ? Goal.Objective : prompt;
                     Review = review = Review is { Phase: not "accepted" } existing && existing.Objective == objective ? existing : new() { Objective = objective };
@@ -241,6 +242,7 @@ public sealed class AgentLoop
                         {
                             var decision = review.ApplyDecision(text, _tools.Root);
                             _observe(new("review", decision == "approved" ? "Phản biện đã chấp thuận sau khi đọc mã hiện tại." : $"Phản biện yêu cầu sửa {review.Findings.Count} vấn đề. Đang chuyển lại cho vai trò viết mã…"));
+                            _observe(new("review_verdict", decision == "approved" ? "Phản biện dự án đã chấp thuận sau khi kiểm tra mã nguồn." : $"Phản biện yêu cầu sửa {review.Findings.Count} vấn đề: {review.ReviewSummary}", decision));
                             if (decision == "changes_requested")
                             {
                                 protocolRetries = scopeRetries = 0;
@@ -305,12 +307,22 @@ public sealed class AgentLoop
                         });
                         continue;
                     }
-                    if (review is not null && !needsInput)
+                    if (ProjectReviewEnabled && !needsInput && (review is not null || _tools.LastFileChangeApplied || evidence != LocalWork.None))
                     {
-                        review.StartReview(visible); protocolRetries = scopeRetries = 0;
-                        messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
-                        messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: CODER candidate is ready. Switch to REVIEWER, read the current project files/diff and independently assess acceptance criteria and actual verification receipts. " + ProjectReview.Instructions });
-                        _observe(new("review", "Đang phản biện — đọc lại mã và đối chiếu kết quả kiểm thử…")); continue;
+                        if (review is null)
+                        {
+                            review = Review = new() { Objective = Goal?.Objective ?? prompt };
+                            review.Resume();
+                        }
+                        if (review.Phase == "coder")
+                        {
+                            review.StartReview(visible); protocolRetries = scopeRetries = 0;
+                            messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
+                            messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Switch to REVIEWER role.\nCODER candidate is ready. Switch to REVIEWER, read the current project files/diff and independently assess acceptance criteria and actual verification receipts. " + ProjectReview.Instructions });
+                            _observe(new("review", "Đang phản biện — đọc lại mã và đối chiếu kết quả kiểm thử…"));
+                            _observe(new("review_switch", "Chuyển sang vai trò Phản biện dự án: Đang đọc lại mã và đối chiếu kết quả kiểm thử…", "reviewer"));
+                            continue;
+                        }
                     }
                     _observe(new("assistant", verification is null || needsInput ? visible
                         : visible + "\n\nGoal đã được kiểm chứng bằng test tự động và thao tác/xác nhận/ảnh giao diện.\n" + verification.LastTestSummary));

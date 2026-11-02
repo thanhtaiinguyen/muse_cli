@@ -10,11 +10,11 @@ internal static class DesktopTheme
     public sealed record ThemePalette(Color Background, Color Sidebar, Color Surface, Color Border, Color Text, Color Muted, Color Accent, Color Success, Color UserBackground, Color UserBorder, Color Notice, Color Folder);
 
     public static readonly ThemePalette DarkPalette = new(
-        Color.FromArgb(20, 20, 20), Color.FromArgb(26, 26, 26),
-        Color.FromArgb(32, 32, 32), Color.FromArgb(46, 46, 46),
+        Color.FromArgb(20, 20, 20), Color.FromArgb(24, 24, 24),
+        Color.FromArgb(32, 32, 35), Color.FromArgb(46, 46, 50),
         Color.FromArgb(236, 236, 236), Color.FromArgb(142, 142, 147),
         Color.FromArgb(59, 130, 246), Color.FromArgb(16, 185, 129),
-        Color.FromArgb(29, 78, 216), Color.FromArgb(37, 99, 235),
+        Color.FromArgb(47, 47, 47), Color.FromArgb(58, 58, 62),
         Color.FromArgb(239, 68, 68), Color.FromArgb(96, 165, 250));
 
     public static readonly ThemePalette LightPalette = new(
@@ -168,6 +168,8 @@ internal sealed class CleanButton : Control, IButtonControl
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Primary { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public bool Circle { get; set; }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Quiet { get; set; }
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool Active { get; set; }
@@ -245,27 +247,57 @@ internal sealed class CleanButton : Control, IButtonControl
 
         var scale = DeviceDpi / 96f;
         var rectangle = new Rectangle(1, 1, Math.Max(1, Width - 3), Math.Max(1, Height - 3));
-        using var path = DesktopTheme.RoundedPath(rectangle, (int)(Primary ? 24 * scale : 18 * scale));
+        using var path = new GraphicsPath();
+        if (Circle)
+        {
+            var diameter = Math.Min(rectangle.Width, rectangle.Height);
+            var circleRect = new Rectangle(rectangle.X + (rectangle.Width - diameter) / 2, rectangle.Y + (rectangle.Height - diameter) / 2, diameter, diameter);
+            path.AddEllipse(circleRect);
+        }
+        else
+        {
+            var round = (int)(Primary ? 24 * scale : 18 * scale);
+            var d = Math.Max(2, Math.Min(round, Math.Min(rectangle.Width, rectangle.Height)));
+            path.AddArc(rectangle.X, rectangle.Y, d, d, 180, 90);
+            path.AddArc(rectangle.Right - d, rectangle.Y, d, d, 270, 90);
+            path.AddArc(rectangle.Right - d, rectangle.Bottom - d, d, d, 0, 90);
+            path.AddArc(rectangle.X, rectangle.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+        }
 
         var fill = Active || _pressed ? DesktopTheme.SurfaceStrong : _hover ? DesktopTheme.SurfaceStrong : DesktopTheme.Surface;
-        if (Primary && Enabled)
+        Color textColor;
+        if (Circle && Primary)
+        {
+            var isDark = DesktopTheme.Mode == DesktopTheme.ThemeMode.Dark;
+            var circleBg = !Enabled ? (isDark ? Color.FromArgb(46, 46, 50) : Color.FromArgb(220, 220, 225))
+                : _hover ? (isDark ? Color.White : Color.FromArgb(40, 40, 40))
+                : (isDark ? Color.FromArgb(242, 242, 242) : Color.FromArgb(18, 18, 18));
+            textColor = !Enabled ? (isDark ? Color.FromArgb(110, 110, 115) : Color.FromArgb(160, 160, 165))
+                : (isDark ? Color.FromArgb(18, 18, 18) : Color.White);
+            using var brush = new SolidBrush(circleBg);
+            e.Graphics.FillPath(brush, path);
+        }
+        else if (Primary && Enabled)
         {
             using var gradient = new LinearGradientBrush(rectangle, _hover ? ControlPaint.Light(DesktopTheme.Primary, .08f) : DesktopTheme.Primary, DesktopTheme.PrimaryEnd, 18f);
             e.Graphics.FillPath(gradient, path);
+            textColor = Color.White;
         }
-        else if (!Quiet || Active || _hover || _pressed)
+        else
         {
-            using var brush = new SolidBrush(fill);
-            e.Graphics.FillPath(brush, path);
+            if (!Quiet || Active || _hover || _pressed)
+            {
+                using var brush = new SolidBrush(fill);
+                e.Graphics.FillPath(brush, path);
+            }
+            if ((!Quiet || Active) && !Primary)
+            {
+                using var border = new Pen(Active ? DesktopTheme.Accent : DesktopTheme.Border);
+                e.Graphics.DrawPath(border, path);
+            }
+            textColor = !Enabled ? DesktopTheme.Muted : Active ? DesktopTheme.Accent : DesktopTheme.Text;
         }
-
-        if ((!Quiet || Active) && !Primary)
-        {
-            using var border = new Pen(Active ? DesktopTheme.Accent : DesktopTheme.Border);
-            e.Graphics.DrawPath(border, path);
-        }
-
-        var textColor = !Enabled ? DesktopTheme.Muted : Primary ? Color.White : Active ? DesktopTheme.Accent : DesktopTheme.Text;
         const TextFormatFlags graphicsFlags = TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.PreserveGraphicsTranslateTransform;
         var hasDescription = !string.IsNullOrEmpty(Description);
         var iconSize = (int)(18 * scale);
@@ -274,11 +306,20 @@ internal sealed class CleanButton : Control, IButtonControl
 
         if (Icon != WorkspaceIcon.None)
         {
-            var textWidth = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding).Width;
-            var iconX = hasDescription ? textRect.Left + 4 : Math.Max(textRect.Left, (Width - textWidth - iconSize - gap) / 2);
-            DesktopIcons.Draw(e.Graphics, new Rectangle(iconX, hasDescription ? (int)(17 * scale) : (Height - iconSize) / 2, iconSize, iconSize), Icon, textColor);
-            textRect.X = iconX + iconSize + gap;
-            textRect.Width = Math.Max(1, Width - textRect.X - (int)(12 * scale));
+            if (Circle && string.IsNullOrEmpty(Text))
+            {
+                var iconX = (Width - iconSize) / 2;
+                var iconY = (Height - iconSize) / 2;
+                DesktopIcons.Draw(e.Graphics, new Rectangle(iconX, iconY, iconSize, iconSize), Icon, textColor);
+            }
+            else
+            {
+                var textWidth = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+                var iconX = hasDescription ? textRect.Left + 4 : Math.Max(textRect.Left, (Width - textWidth - iconSize - gap) / 2);
+                DesktopIcons.Draw(e.Graphics, new Rectangle(iconX, hasDescription ? (int)(17 * scale) : (Height - iconSize) / 2, iconSize, iconSize), Icon, textColor);
+                textRect.X = iconX + iconSize + gap;
+                textRect.Width = Math.Max(1, Width - textRect.X - (int)(12 * scale));
+            }
         }
 
         if (hasDescription)

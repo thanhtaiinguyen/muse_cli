@@ -97,6 +97,13 @@ public sealed class ChatTranscript : UserControl
         return card;
     }
 
+    public ReviewCard AddReviewCard(string title, string verdict = "reviewing")
+    {
+        var card = new ReviewCard(title, verdict);
+        AddCard(card);
+        return card;
+    }
+
     public ChatMessageCard AddMessage(string role, string text)
     {
         var isUser = role is "Bạn" or "bạn" or "user";
@@ -517,6 +524,159 @@ public sealed class ToolCallCard : ChatCard
     }
 }
 
+/// <summary>Dual-role project review card displaying critic status, findings and verdict.</summary>
+public sealed class ReviewCard : ChatCard
+{
+    private readonly Label _icon = new() { AutoSize = false, Font = new Font("Segoe UI Emoji", 11f), TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Label _title = new() { AutoSize = false, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Label _badge = new() { AutoSize = false, Font = new Font("Segoe UI", 8.5f, FontStyle.Bold), TextAlign = ContentAlignment.MiddleCenter };
+    private readonly Panel _header = new() { Height = 34, Dock = DockStyle.Top };
+    private readonly Label _summary = new() { AutoSize = false, Font = DesktopTheme.Body, TextAlign = ContentAlignment.TopLeft };
+    private readonly ListBox _findingsList = new()
+    {
+        BorderStyle = BorderStyle.None,
+        IntegralHeight = false,
+        Font = DesktopTheme.Small,
+        SelectionMode = SelectionMode.None,
+    };
+    private string _verdict = "reviewing";
+    private int _calculatedHeight = 44;
+
+    public override int DesiredHeight => _calculatedHeight;
+
+    public ReviewCard(string title, string verdict = "reviewing")
+    {
+        _verdict = verdict;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        BackColor = DesktopTheme.Surface;
+        Padding = new Padding(14, 8, 14, 10);
+
+        _icon.SetBounds(2, 4, 26, 26);
+        _icon.Text = "🔍";
+
+        _title.Text = "Vai trò: Phản biện dự án";
+        _title.ForeColor = DesktopTheme.Accent;
+
+        UpdateBadge(verdict);
+
+        _header.Controls.AddRange(new Control[] { _icon, _title, _badge });
+        _summary.ForeColor = DesktopTheme.Text;
+        _summary.Text = title;
+
+        _findingsList.BackColor = DesktopTheme.Surface;
+        _findingsList.ForeColor = DesktopTheme.Text;
+        _findingsList.Visible = false;
+
+        Controls.AddRange(new Control[] { _findingsList, _summary, _header });
+        RefreshHeight();
+    }
+
+    private void UpdateBadge(string verdict)
+    {
+        _verdict = verdict;
+        _badge.Text = verdict switch
+        {
+            "approved" => "✓ Đã chấp thuận",
+            "changes_requested" => "⚠ Yêu cầu sửa đổi",
+            _ => "● Đang phản biện…",
+        };
+        _badge.ForeColor = verdict switch
+        {
+            "approved" => DesktopTheme.Success,
+            "changes_requested" => DesktopTheme.Notice,
+            _ => DesktopTheme.Accent,
+        };
+    }
+
+    public void SetVerdict(string verdict, string summaryText, List<ReviewFinding>? findings = null)
+    {
+        UpdateBadge(verdict);
+        _summary.Text = summaryText;
+
+        if (findings is { Count: > 0 })
+        {
+            _findingsList.Items.Clear();
+            foreach (var f in findings)
+            {
+                var sev = f.Severity == "high" ? "[Cao]" : f.Severity == "medium" ? "[Vừa]" : "[Thấp]";
+                _findingsList.Items.Add($"{sev} {f.Path}:{f.Line} — {f.Issue} (Sửa: {f.Fix})");
+            }
+            _findingsList.Visible = true;
+            _findingsList.Height = Math.Min(160, Math.Max(24, _findingsList.Items.Count * 22 + 4));
+        }
+        else
+        {
+            _findingsList.Visible = false;
+        }
+        RefreshHeight();
+    }
+
+    private void RefreshHeight()
+    {
+        var scale = DeviceDpi / 96f;
+        var headerWidth = Math.Max(100, Width - 28);
+        _header.Width = headerWidth;
+        var badgeWidth = Math.Max((int)(110 * scale), TextRenderer.MeasureText(_badge.Text, _badge.Font).Width + 14);
+        _badge.SetBounds(Math.Max(10, headerWidth - badgeWidth - 4), 4, badgeWidth, 26);
+        _title.SetBounds(32, 4, Math.Max(20, _badge.Left - 36), 26);
+
+        var measured = TextRenderer.MeasureText(_summary.Text, _summary.Font, new Size(Math.Max(40, Width - 28), 0), TextFormatFlags.WordBreak);
+        var summaryHeight = Math.Max(22, measured.Height + 6);
+        _summary.SetBounds(14, _header.Bottom + 4, Math.Max(40, Width - 28), summaryHeight);
+
+        var listTop = _summary.Bottom + 4;
+        if (_findingsList.Visible)
+        {
+            _findingsList.SetBounds(14, listTop, Math.Max(40, Width - 28), _findingsList.Height);
+            _calculatedHeight = _findingsList.Bottom + 10;
+        }
+        else
+        {
+            _calculatedHeight = _summary.Bottom + 10;
+        }
+
+        Height = _calculatedHeight;
+        UpdateRegion();
+        OnContentHeightChanged();
+        Invalidate();
+    }
+
+    public override void RefreshTheme()
+    {
+        BackColor = DesktopTheme.Surface;
+        _summary.ForeColor = DesktopTheme.Text;
+        _findingsList.BackColor = DesktopTheme.Surface;
+        _findingsList.ForeColor = DesktopTheme.Text;
+        _title.ForeColor = DesktopTheme.Accent;
+        UpdateBadge(_verdict);
+        UpdateRegion();
+        Invalidate();
+    }
+
+    private void UpdateRegion()
+    {
+        if (Width < 6 || Height < 6) return;
+        Region?.Dispose();
+        Region = new Region(DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 14));
+    }
+
+    protected override void OnResize(EventArgs eventargs)
+    {
+        base.OnResize(eventargs);
+        RefreshHeight();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 14);
+        using var brush = new SolidBrush(BackColor);
+        e.Graphics.FillPath(brush, path);
+        using var border = new Pen(_verdict == "approved" ? DesktopTheme.Success : _verdict == "changes_requested" ? DesktopTheme.Notice : DesktopTheme.Border);
+        e.Graphics.DrawPath(border, path);
+    }
+}
+
 /// <summary>Notification card for system errors, cancellations, and status messages.</summary>
 public sealed class NoticeCard : ChatCard
 {
@@ -577,7 +737,10 @@ public sealed class NoticeCard : ChatCard
         using var path = DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 12);
         using var brush = new SolidBrush(BackColor);
         e.Graphics.FillPath(brush, path);
-        using var border = new Pen(DesktopTheme.Notice);
+        var isSevere = _body.Text.Contains("lỗi", StringComparison.OrdinalIgnoreCase)
+            || _body.Text.Contains("thất bại", StringComparison.OrdinalIgnoreCase)
+            || _body.Text.Contains("error", StringComparison.OrdinalIgnoreCase);
+        using var border = new Pen(isSevere ? DesktopTheme.Notice : DesktopTheme.Border);
         e.Graphics.DrawPath(border, path);
     }
 }
@@ -798,8 +961,8 @@ public sealed class ChatMessageCard : ChatCard
         {
             if (IsUser)
             {
-                var padX = 14;
-                var padY = 8;
+                var padX = 16;
+                var padY = 10;
                 var bodyWidth = Math.Max(20, Width - padX * 2);
                 var measured = TextRenderer.MeasureText(_source, _body.Font, new Size(bodyWidth, 0), TextFormatFlags.WordBreak);
                 var bodyHeight = Math.Max(22, measured.Height + 4);
@@ -855,7 +1018,7 @@ public sealed class ChatMessageCard : ChatCard
         Region?.Dispose();
         if (IsUser)
         {
-            Region = new Region(DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 18));
+            Region = new Region(DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 20));
         }
         else
         {
@@ -874,7 +1037,7 @@ public sealed class ChatMessageCard : ChatCard
         if (IsUser)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var path = DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 18);
+            using var path = DesktopTheme.RoundedPath(new Rectangle(0, 0, Width - 1, Height - 1), 20);
             using var brush = new SolidBrush(BackColor);
             e.Graphics.FillPath(brush, path);
             using var border = new Pen(DesktopTheme.UserBorder);
