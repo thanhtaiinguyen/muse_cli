@@ -6,8 +6,9 @@ namespace Muse2Api.Agent;
 
 public sealed partial class ToolExecutor
 {
-    private sealed class RunningProcess(Process process, ShellInvocation invocation)
+    private sealed class RunningProcess(Process process, ShellInvocation invocation, string command)
     {
+        public string Command { get; } = command;
         public Process Process { get; } = process;
         public StringBuilder Output { get; } = new();
         public object Sync { get; } = new();
@@ -19,6 +20,13 @@ public sealed partial class ToolExecutor
     }
     private readonly Dictionary<string, RunningProcess> _processes = new();
     private readonly object _processLock = new();
+    public JsonArray OwnedProcessContext()
+    {
+        lock (_processLock)
+            return new JsonArray(_processes.Select(item => (JsonNode)new JsonObject { ["process_id"] = item.Key,
+                ["native_process_id"] = item.Value.Process.Id, ["running"] = !item.Value.Completion.IsCompleted,
+                ["command"] = item.Value.Command[..Math.Min(300, item.Value.Command.Length)] }).ToArray());
+    }
 
     private async Task<string> StartProcessAsync(JsonObject args, CancellationToken cancel)
     {
@@ -37,7 +45,7 @@ public sealed partial class ToolExecutor
         var process = new Process { StartInfo = ProcessInfo(invocation.File, invocation.Args, directory, invocation.Encoding, input: true) };
         try { cancel.ThrowIfCancellationRequested(); process.Start(); }
         catch { invocation.Cleanup(); process.Dispose(); throw; }
-        var running = new RunningProcess(process, invocation);
+        var running = new RunningProcess(process, invocation, command);
         var id = Guid.NewGuid().ToString("N");
         async Task Drain(StreamReader reader, string prefix)
         {

@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 namespace Muse2Api.Agent;
 
 public sealed record AgentEvent(string Kind, string Text, string? Tool = null, string? Path = null);
+public sealed record AgentCheckpoint(List<JsonObject> History, GoalRun? Goal, ProjectReview? Review);
 
 /// <summary>Shared, cancellable chat/tool loop for the desktop and terminal.</summary>
 public sealed class AgentLoop
@@ -17,6 +18,9 @@ public sealed class AgentLoop
     public List<JsonObject> History { get; } = new();
     public JsonArray? RetrievedContext { get; set; }
     public GoalRun? Goal { get; set; }
+    public bool ProjectReviewEnabled { get; set; }
+    public ProjectReview? Review { get; set; }
+    public Func<AgentCheckpoint, CancellationToken, Task>? SaveCheckpoint { get; set; }
     /// <summary>Directory of user-installed skills. When the prompt mentions
     /// a skill with @alias, its content is added to this turn's instructions.</summary>
     public string? SkillsDirectory { get; set; }
@@ -50,6 +54,7 @@ public sealed class AgentLoop
         var messages = new List<JsonObject>();
         string? pendingTool = null;
         GoalVerification? verification = null;
+        ProjectReview? review = null;
         var userPrompt = prompt;
         try
         {
@@ -77,9 +82,22 @@ public sealed class AgentLoop
                 if (goalFollowUp && !WorkflowPolicy.IsContinue(userPrompt)) Goal.AddFollowUp(userPrompt);
                 Goal.Status = "running"; Goal.Summary = "Đang xây dựng và kiểm chứng mục tiêu.";
                 Goal.PendingQuestion = null;
-                verification = new();
+                var requiresUi = (LocalTaskIntent.Required(Goal.Objective) & LocalTaskIntent.ComputerWork) != 0;
+                verification = new(requiresUi);
                 prompt = Goal.TaskPrompt;
                 _observe(new("goal", "Đang theo đuổi mục tiêu: " + prompt));
+            }
+            if (ProjectReviewEnabled)
+            {
+                if (verification is null && Review is { Phase: not "accepted" } savedReview && WorkflowPolicy.IsContinue(userPrompt))
+                    prompt = savedReview.Objective;
+                if (verification is not null || LocalTaskIntent.Required(prompt).HasFlag(LocalWork.Edit))
+                {
+                    var objective = Goal is not null && verification is not null ? Goal.Objective : prompt;
+                    Review = review = Review is { Phase: not "accepted" } existing && existing.Objective == objective ? existing : new() { Objective = objective };
+                    review.Resume();
+                    _observe(new("review", review.IsReviewer ? "Đang tiếp tục phản biện dự án…" : "Đang viết mã — sẽ phản biện sau khi có kết quả kiểm thử."));
+                }
             }
             var context = await _tools.WorkspaceContextAsync(cancel);
             var skillBlock = "";
@@ -119,7 +137,12 @@ public sealed class AgentLoop
             messages.Add(new() { ["role"] = "user", ["content"] = userMessageContent });
             var failures = new Dictionary<string, int>();
             var required = LocalTaskIntent.Required(prompt);
-            if (verification is not null) required |= LocalWork.Read | LocalWork.CommandVerified | LocalWork.ComputerInteract | LocalWork.ComputerAssert | LocalWork.ComputerScreenshot;
+            if (verification is not null)
+            {
+                required |= LocalWork.Read | LocalWork.CommandVerified;
+                if ((LocalTaskIntent.Required(prompt) & LocalTaskIntent.ComputerWork) != 0)
+                    required |= LocalWork.ComputerInteract | LocalWork.ComputerAssert | LocalWork.ComputerScreenshot;
+            }
             var evidence = LocalWork.None;
             var protocolRetries = 0;
             var malformedReplies = 0;
@@ -136,6 +159,13 @@ public sealed class AgentLoop
                 if (ConversationContext.Compact(messages, _tools.Root, protectedPrefix: 1))
                     _observe(new("context_compacted", "Đã nén ngữ cảnh cũ trên máy; giữ mục tiêu, lời dặn và kết quả gần đây. Không tạo thêm lượt chat web."));
                 _observe(new("assistant_start", "Đang suy nghĩ…"));
+                if (SaveCheckpoint is not null)
+                {
+                    var checkpoint = new AgentCheckpoint(messages.Skip(1).Select(WithoutImage).ToList(),
+                        Goal is null ? null : System.Text.Json.JsonSerializer.Deserialize<GoalRun>(System.Text.Json.JsonSerializer.Serialize(Goal)),
+                        Review is null ? null : System.Text.Json.JsonSerializer.Deserialize<ProjectReview>(System.Text.Json.JsonSerializer.Serialize(Review)));
+                    await SaveCheckpoint(checkpoint, cancel);
+                }
                 var request = FitContext(messages);
                 // Requirements apply to this user turn only. A discussion after
                 // a coding task must not inherit the earlier task's operations.
@@ -148,11 +178,13 @@ public sealed class AgentLoop
                         ["conversation_context"] = ConversationContext.Snapshot(messages.Skip(1), _tools.Root),
                         ["retrieved_context"] = RetrievedContext?.DeepClone(),
                         ["active_skills"] = skillBlock.Length == 0 ? null : JsonValue.Create(skillBlock),
+                        ["project_review"] = review?.Snapshot(),
                         ["goal_session"] = Goal is null ? null : new JsonObject { ["objective"] = Goal.Objective,
                             ["status"] = Goal.Status, ["pending_question"] = Goal.PendingQuestion },
                         ["goal_mode"] = verification is null ? null : new JsonObject { ["objective"] = Goal!.Objective,
                             ["instructions"] = GoalRun.Instructions, ["verification"] = verification.Snapshot() },
                         ["remaining"] = (required & ~evidence).ToString(), ["computer_scope"] = _tools.Computer?.Context ?? "unavailable",
+                        ["owned_processes"] = _tools.OwnedProcessContext(),
                         ["next"] = required == LocalWork.None
                             ? "Respond to the current user message in Vietnamese. For discussion, advice or a comment, return status done with the actual answer in summary and no actions. Resolve references such as continue using conversation_context, but only propose actions requested by the current user; do not execute historical tasks for a casual comment. Do not claim unobserved execution."
                             : "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.",
@@ -186,21 +218,53 @@ public sealed class AgentLoop
                     continue;
                 }
                 malformedReplies = 0;
-                if (calls.Count > 0 && (verification is null && Goal?.Status == "completed" && WorkflowPolicy.IsContinue(userPrompt)
-                    || calls.Any(call => !WorkflowPolicy.Allows(prompt, call, verification is not null))))
+                if (calls.Count > 0 && (verification is null && review is null && Goal?.Status == "completed" && WorkflowPolicy.IsContinue(userPrompt)
+                    || calls.Any(call => !WorkflowPolicy.Allows(prompt, call, verification is not null) || review?.IsReviewer == true && !ProjectReview.CanInspect(call))))
                 {
                     messages[^1]["content"] = "[Unverified reply: action batch exceeded the current user's request.]";
                     _observe(new("protocol_retry", "Đã bỏ qua thao tác không thuộc yêu cầu hiện tại. Đang điều chỉnh phản hồi…"));
                     if (++scopeRetries >= 2)
                     { _observe(new("incomplete", "Muse đề xuất thao tác ngoài yêu cầu nên app đã chặn toàn bộ, chưa thay đổi dự án. Hãy gửi lại yêu cầu rõ hơn.")); return false; }
-                    messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: The entire action batch was rejected BEFORE execution. This turn is discussion/advice or explicitly read-only. Respect the current user request; return an answer in summary, or read-only file inspection when requested. Do not run commands, edit files or control the screen. Do not resume historical work." });
+                    messages.Add(new() { ["role"] = "user", ["content"] = review?.IsReviewer == true
+                        ? "LOCAL EXECUTOR: Reviewer is READ-ONLY. This entire batch was rejected before execution. Inspect current files/diff and report concrete findings; ask coder to fix/run tests. " + ProjectReview.Instructions
+                        : "LOCAL EXECUTOR: The entire action batch was rejected BEFORE execution. This turn is discussion/advice or explicitly read-only. Respect the current user request; return an answer in summary, or read-only file inspection when requested. Do not run commands, edit files or control the screen. Do not resume historical work." });
                     continue;
                 }
                 var visible = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(text));
                 var needsInput = ToolCallParser.NeedsInput(text);
-                if (verification is not null && WorkflowPolicy.IsPermissionQuestion(visible)) needsInput = false;
+                if ((verification is not null || review is not null) && WorkflowPolicy.IsPermissionQuestion(visible)) needsInput = false;
                 if (calls.Count == 0)
                 {
+                    if (review?.IsReviewer == true && !needsInput)
+                    {
+                        try
+                        {
+                            var decision = review.ApplyDecision(text, _tools.Root);
+                            _observe(new("review", decision == "approved" ? "Phản biện đã chấp thuận sau khi đọc mã hiện tại." : $"Phản biện yêu cầu sửa {review.Findings.Count} vấn đề. Đang chuyển lại cho vai trò viết mã…"));
+                            if (decision == "changes_requested")
+                            {
+                                protocolRetries = scopeRetries = 0;
+                                messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Switch to CODER. Address the reviewer findings using current files; rerun checks after edits. " + review.Snapshot().ToJsonString() });
+                                continue;
+                            }
+                            if (verification is not null && verification.Missing.Count > 0)
+                            {
+                                review.Phase = "coder";
+                                messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Review approved, but goal verification is incomplete. Continue CODER checks: " + string.Join("; ", verification.Missing) });
+                                continue;
+                            }
+                            _observe(new("assistant", review.CandidateSummary + "\n\nPhản biện dự án: " + review.ReviewSummary
+                                + (verification?.LastTestSummary is { Length: > 0 } testSummary ? "\n" + testSummary : "")));
+                            _observe(new("completed", "Đã hoàn tất viết mã, kiểm chứng và phản biện dự án.")); return true;
+                        }
+                        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.Text.Json.JsonException or FormatException)
+                        {
+                            messages[^1]["content"] = "[Unverified reply: invalid project review.]";
+                            if (protocolRetries++ >= 2) { _observe(new("incomplete", "Phản biện chưa đủ bằng chứng: " + ex.Message)); return false; }
+                            messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Review rejected: " + ex.Message + " " + ProjectReview.Instructions });
+                            _observe(new("protocol_retry", "Đang bổ sung bằng chứng phản biện…")); continue;
+                        }
+                    }
                     if (verification is not null && verification.Missing.Count > 0 && !needsInput)
                     {
                         messages[^1]["content"] = "[Unverified reply: goal checks are still missing.]\n" + text;
@@ -241,6 +305,13 @@ public sealed class AgentLoop
                         });
                         continue;
                     }
+                    if (review is not null && !needsInput)
+                    {
+                        review.StartReview(visible); protocolRetries = scopeRetries = 0;
+                        messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
+                        messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: CODER candidate is ready. Switch to REVIEWER, read the current project files/diff and independently assess acceptance criteria and actual verification receipts. " + ProjectReview.Instructions });
+                        _observe(new("review", "Đang phản biện — đọc lại mã và đối chiếu kết quả kiểm thử…")); continue;
+                    }
                     _observe(new("assistant", verification is null || needsInput ? visible
                         : visible + "\n\nGoal đã được kiểm chứng bằng test tự động và thao tác/xác nhận/ảnh giao diện.\n" + verification.LastTestSummary));
                     if (needsInput)
@@ -272,11 +343,18 @@ public sealed class AgentLoop
                             output => _observe(new("command_output", output, call.Name)));
                     }
                     catch (OperationCanceledException) { throw; }
-                    catch (Exception ex) { result = "error: " + ex.Message; }
+                    catch (Exception ex) { result = "error: " + (string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name + ": không đọc được phần tử giao diện hiện tại; hãy quan sát lại trước khi thao tác." : ex.Message); }
                     var filesChanged = call.Name is "write_file" or "edit_file" ? _tools.LastFileChangeApplied && !ToolOutcome.IsFailure(result)
                         : call.Name == "run_command" && _tools.LastCommandChangedFiles.Count > 0;
+                    protocolRetries = 0;
                     verification?.Record(call, result, filesChanged,
                         imageCaptured: call.Name == "computer_screenshot" && _tools.LastComputerImage is not null);
+                    if (ProjectReviewEnabled && review is null && filesChanged)
+                    {
+                        review = Review = new() { Objective = Goal?.Objective ?? prompt };
+                        review.Resume();
+                    }
+                    review?.Record(call, result, filesChanged);
                     if (verification is not null && filesChanged)
                     {
                         // A fix starts another real verification attempt. The

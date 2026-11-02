@@ -206,6 +206,17 @@ public class WorkspaceAgentTests
     }
 
     [Theory]
+    [InlineData(false)] [InlineData(true)]
+    public async Task AgentClientPreservesExplicitNeedsInputEvenWithoutAQuestionMark(bool stream)
+    {
+        await using var host=await GatewayHost.Start(new ScriptedDriver(new[]{"{\"status\":\"needs_input\",\"summary\":\"Chọn framework để tiếp tục.\"}"}));
+        using var client=new AgentClient(host.Client.BaseAddress!.ToString(),"muse-chat","test-api");
+        var response=await client.ChatAsync(new(){new(){["role"]="user",["content"]="test"}},onDelta:stream?_=>{}:null);
+        Assert.Empty(response.Calls);Assert.True(ToolCallParser.NeedsInput(response.Text));
+        Assert.Equal("Chọn framework để tiếp tục.",ToolCallParser.PlannerReply(response.Text));
+    }
+
+    [Theory]
     [InlineData("```tool\n{\"path\":\"a\"}\n```")]
     [InlineData("```tool\n{\"name\":\"read_file\"")]
     public void Parser_ReportsMalformedToolInsteadOfClaimingCompletion(string text)

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$WorkspaceRoot = '')
+param([string]$WorkspaceRoot = '', [switch]$ScheduledRun)
 $ErrorActionPreference = 'Stop'
 
 # Invoked every minute by the MuseSwapRelease scheduled task, which
@@ -40,10 +40,11 @@ catch { return } # Another swap run is active.
 try {
     $distPrefix = $distributionRoot + [IO.Path]::DirectorySeparatorChar
     $running = @(Get-Process -Name Muse -ErrorAction SilentlyContinue | Where-Object { !$_.Path -or $_.Path.StartsWith($distPrefix, [StringComparison]::OrdinalIgnoreCase) })
+    $candidates = @(Get-ChildItem -LiteralPath $distributionRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^Muse\.stage\.[a-f0-9]{32}$' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'release-verified.json')) })
+    if (!$candidates.Count) { if ($ScheduledRun) { Complete-MuseSwapTask $workspaceRoot }; return }
     if ($running.Count) { return } # Muse still in use; try again next minute.
-
-    $stages = @(Get-ChildItem -LiteralPath $distributionRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^Muse\.stage\.[a-f0-9]{32}$' -and (Test-MuseReleaseValidation $_.FullName $distributionRoot) } | Sort-Object LastWriteTime -Descending)
-    if (!$stages.Count) { return }
+    $stages = @($candidates | Where-Object { Test-MuseReleaseValidation $_.FullName $distributionRoot } | Sort-Object LastWriteTime -Descending)
+    if (!$stages.Count) { if ($ScheduledRun) { Complete-MuseSwapTask $workspaceRoot }; return }
     $stage = $stages[0]
     $null = Assert-MuseReleasePath $stage.FullName $distributionRoot
     $null = Assert-MuseReleasePath $currentRelease $distributionRoot
@@ -68,6 +69,7 @@ try {
     foreach ($extra in $stages | Select-Object -Skip 1) {
         try { Remove-ReleaseDir $extra.FullName } catch { Write-SwapLog "stale stage cleanup failed: $($_.Exception.Message)" }
     }
+    if ($ScheduledRun) { Complete-MuseSwapTask $workspaceRoot }
 }
 catch { Write-SwapLog "error: $($_.Exception.Message)" }
 finally { if ($lockStream) { $lockStream.Dispose() } }

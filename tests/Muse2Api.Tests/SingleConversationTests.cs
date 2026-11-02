@@ -321,6 +321,84 @@ public class SingleConversationTests
         }
         finally { await driver.ShutdownAsync(); }
     }
+    [BrowserFact]
+    public async Task OldConversationProseAndAnExistingAlertDoNotPoisonTheNextUserRequest()
+    {
+        using var dir=new TempDirectory();var account=Account();var fixture=new WebFixture {Responses=new[]{
+            "{\"status\":\"done\",\"summary\":\"Project text: Connecting... usage limit out of credits failed to send\"}",
+            "{\"status\":\"done\",\"summary\":\"continued successfully\"}"},Script="""
+            const oldNotice=document.createElement('div');oldNotice.setAttribute('role','alert');oldNotice.textContent='Something went wrong';document.body.append(oldNotice);
+            """};
+        var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("Project text",await Reply(driver,account,new(){("user","inspect source")}));}
+        finally{await driver.ShutdownAsync();}
+        driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("continued successfully",await Reply(driver,account,new(){("user","continue")}));Assert.Equal(1,fixture.NewThreads);Assert.Equal(2,fixture.Submissions);}
+        finally{await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
+    public async Task SemanticMessageLayoutAndExactMarkerFallbackBothContinueTheSameSavedChat()
+    {
+        using var dir=new TempDirectory();var account=Account();var fixture=new WebFixture {Script="""
+            userBubble=text=>{const u=document.createElement('article');u.dataset.messageAuthorRole='user';const s=document.createElement('span');s.textContent=text;u.append(s);messages.append(u);};
+            bubble=text=>{const a=document.createElement('article');a.dataset.messageAuthorRole='assistant';const pre=document.createElement('pre');const code=document.createElement('code');code.className='language-json';code.textContent=text;pre.append(code);a.append(pre);messages.append(a);};
+            """};
+        var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("fixture done",await Reply(driver,account,new(){("user","first")}));}
+        finally{await driver.ShutdownAsync();}
+        fixture.Script += "userBubble=text=>{const u=document.createElement('article');const s=document.createElement('span');s.textContent=text;u.append(s);messages.append(u);};";
+        driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("fixture done",await Reply(driver,account,new(){("user","second")}));Assert.Equal(1,fixture.NewThreads);Assert.Equal(2,fixture.Submissions);}
+        finally{await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
+    public async Task AStillGeneratingSavedChatRejectsNewSubmissionAndCanContinueWhenReady()
+    {
+        using var dir=new TempDirectory();var account=Account();var fixture=new WebFixture();
+        var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);await Reply(driver,account,new(){("user","first")});}
+        finally{await driver.ShutdownAsync();}
+        fixture.Script="if(location.pathname!=='/thread/new'){const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);}";
+        driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try
+        {
+            await fixture.Install(driver,account);
+            var failure=await Assert.ThrowsAsync<UpstreamException>(()=>Reply(driver,account,new(){("user","continue")}));
+            Assert.Equal("upstream_conversation_busy",failure.Code);Assert.Equal(1,fixture.Submissions);
+            fixture.Script="";
+            Assert.Contains("fixture done",await Reply(driver,account,new(){("user","continue after ready")}));
+            Assert.Equal(1,fixture.NewThreads);Assert.Equal(2,fixture.Submissions);
+        }
+        finally{await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
+    public async Task VisibleGenerationCanOutlastTheInitialTokenDeadlineWithoutResubmission()
+    {
+        using var dir=new TempDirectory();var account=Account();var fixture=new WebFixture {Script="""
+            const render=bubble;bubble=text=>{const stop=document.createElement('button');stop.setAttribute('aria-label','Stop generating');document.body.append(stop);setTimeout(()=>{render(text);stop.remove();},1100);};
+            """};
+        var driver=new BrowserDriver(new Settings {DataDir=dir.Root,Headless=true,ChromiumPath=DesktopProfile.FindBrowser(),ChatTimeout=8,FirstTokenTimeout=.35,ChatIdleTimeout=3});await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("fixture done",await Reply(driver,account,new(){("user","think then answer")}));Assert.Equal(1,fixture.Submissions);}
+        finally{await driver.ShutdownAsync();}
+    }
+
+    [BrowserFact]
+    public async Task MovingAnExistingHistoricalReplyAfterTheNewRequestDoesNotReplayIt()
+    {
+        using var dir=new TempDirectory();var account=Account();var fixture=new WebFixture {Responses=new[]{
+            "{\"status\":\"done\",\"summary\":\"FIRST_OLD_REPLY\"}","{\"status\":\"done\",\"summary\":\"SECOND_CURRENT_REPLY\"}"},Script="""
+            const render=bubble;let turn=0,old=null;bubble=text=>{if(++turn===1){render(text);old=messages.lastChild;return;}messages.append(old);setTimeout(()=>render(text),1200);};
+            """};
+        var driver=new BrowserDriver(BrowserSettings(dir.Root));await driver.StartupAsync();
+        try{await fixture.Install(driver,account);Assert.Contains("FIRST_OLD_REPLY",await Reply(driver,account,new(){("user","first")}));
+            var current=await Reply(driver,account,new(){("user","second")});Assert.Contains("SECOND_CURRENT_REPLY",current);Assert.DoesNotContain("FIRST_OLD_REPLY",current);
+            Assert.Equal(2,fixture.Submissions);Assert.Equal(1,fixture.NewThreads);}
+        finally{await driver.ShutdownAsync();}
+    }
+
     private static async Task<string> Reply(BrowserDriver driver, Account account, List<(string Role, string Text)> turns)
     {
         var output = "";

@@ -21,6 +21,20 @@ public sealed class Gateway
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(req.Cancel, cancel);
         req = req with { Cancel = linked.Token };
         var tried = new List<string>();
+        if (req.LocalTools && req.ConversationHint is { Length: > 0 } hint && _driver is ILocalConversationOwner owners)
+        {
+            var accounts = _pool.All();
+            var ownerId = owners.ResolveConversationOwner(hint, accounts);
+            if (ownerId is not null)
+            {
+                var owner = accounts.FirstOrDefault(account => account.Id == ownerId);
+                if (owner is null || !owner.Enabled)
+                    throw UpstreamException.Refused("The account owning this conversation is disabled or missing. Enable the original account before continuing.", "upstream_conversation_account");
+                if (owner.Status == AccountStatus.Invalid)
+                    throw UpstreamException.Auth("The original account for this saved conversation needs login again; conversation retained.");
+                tried.AddRange(accounts.Where(account => account.Id != ownerId).Select(account => account.Id));
+            }
+        }
         for (var attempt = 0; attempt <= _maxFailover; attempt++)
         {
             using var lease = await LeaseFor(tried, req.ConversationHint, "chat", linked.Token);

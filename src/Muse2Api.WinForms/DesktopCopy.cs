@@ -5,6 +5,16 @@ internal static class DesktopCopy
     public static string FriendlyError(string message)
     {
         var text = message.ToLowerInvariant();
+        if (text.Contains("upstream_conversation_account"))
+            return "Chat này thuộc một tài khoản Muse khác hoặc tài khoản gốc đang tắt. Hãy bật/đăng nhập lại đúng tài khoản trong Cài đặt. Lịch sử được giữ nguyên; app không tự chuyển tài khoản hay tạo chat mới.";
+        if (text.Contains("upstream_conversation_busy"))
+            return "Muse web vẫn đang tạo câu trả lời trước trong chat này. App chưa gửi tin mới; hãy chờ web hoàn tất rồi tiếp tục.";
+        if (text.Contains("upstream_conversation_unavailable"))
+            return "Không mở được chat gốc trên Muse web. Hãy kiểm tra chat còn tồn tại và đúng tài khoản; lịch sử trên máy vẫn được giữ, app không tự tạo chat thay thế.";
+        if (text.Contains("upstream_reply_unbound"))
+            return "App chưa xác định được câu trả lời mới trên Muse web. Cuộc chat được giữ và không tự gửi lại; kiểm tra web cùng chi tiết trong Terminal trước khi tiếp tục.";
+        if (text.Contains("upstream_auth_failed"))
+            return "Phiên đăng nhập tài khoản sở hữu chat đã hết hạn. Hãy đăng nhập lại đúng tài khoản Muse; lịch sử không bị xóa.";
         if (text.Contains("upstream_response_unavailable"))
             return "App chưa đọc được phản hồi hoàn tất từ Muse web. Đã dừng chờ và giữ cuộc chat hiện tại, không tự gửi lại. Đây không phải thông báo hết lượt của tài khoản; xem Terminal trước khi tiếp tục.";
         if (text.Contains("stopped making progress") || text.Contains("web state unavailable") || text.Contains("web stopped responding") || text.Contains("web page closed"))

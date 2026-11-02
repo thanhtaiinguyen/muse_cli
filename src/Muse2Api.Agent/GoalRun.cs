@@ -46,6 +46,14 @@ public sealed class GoalRun
         computer tools to inspect the user-authorized test window, perform the actual feature workflows,
         assert expected results with computer_assert and capture computer_screenshot AFTER the final action.
         The local host shows a live preview of the authorized window; never bypass its window chooser.
+        For game/canvas controls, computer_key supports letters/digits, SHIFT and SHIFT+letter, and
+        hold_ms 0..2000 for actual held input. A zero-length tap may not move a frame-driven game.
+        After ui_read_timeout try ONE smaller inspect (max_depth:3,limit:30). For an Electron test app
+        you started with run_command, you can stop only that owned process_id and relaunch once with
+        --force-renderer-accessibility, then inspect again. Do not ask the user to close test processes
+        you can stop yourself; never close unrelated user applications or bypass screen authorization.
+        If the provider remains unavailable, preserve the goal and report the exact blocked checks;
+        do not claim UI success from a window title alone.
         After any source edit rerun checks. Use process_status wait_ms:30000 while a check is running;
         starting a process is not a passing test. Report actual test counts, failures and remaining issues.
         Do not mark done based on a plan, old receipts, empty/zero tests, or skipped/cancelled tests.
@@ -56,8 +64,9 @@ public sealed class GoalRun
 }
 
 /// <summary>Fresh receipts gate completion; model text cannot set a check to passed.</summary>
-public sealed class GoalVerification
+public sealed class GoalVerification(bool requiresUi = true)
 {
+    private readonly bool _requiresUi = requiresUi;
     private int _revision;
     private bool _tests, _interacted, _asserted, _captured;
     private readonly Dictionary<string, (string Command, string Workdir, int Revision)> _processes = new();
@@ -73,9 +82,12 @@ public sealed class GoalVerification
             if (!_tests) missing.Add("Chạy toàn bộ bộ kiểm thử liên quan: có test thực sự và exit_code=0 sau lần sửa cuối");
             if (_failedChecks.Count > 0) missing.Add("Chạy lại và sửa các lệnh kiểm thử còn thất bại/chưa xác minh");
             if (_processes.Values.Any(p => IsTestCommand(p.Command))) missing.Add("Chờ các tiến trình kiểm thử kết thúc");
-            if (!_interacted) missing.Add("Thao tác kiểm thử trực tiếp trên cửa sổ đã cho phép");
-            if (!_asserted || _failedAssertions.Count > 0) missing.Add("Xác nhận kết quả giao diện bằng computer_assert sau thao tác cuối");
-            if (!_captured) missing.Add("Chụp kết quả giao diện sau thao tác cuối");
+            if (_requiresUi)
+            {
+                if (!_interacted) missing.Add("Thao tác kiểm thử trực tiếp trên cửa sổ đã cho phép");
+                if (!_asserted || _failedAssertions.Count > 0) missing.Add("Xác nhận kết quả giao diện bằng computer_assert sau thao tác cuối");
+                if (!_captured) missing.Add("Chụp kết quả giao diện sau thao tác cuối");
+            }
             return missing;
         }
     }
@@ -93,7 +105,8 @@ public sealed class GoalVerification
     {
         if (filesChanged)
         {
-            _revision++; _tests = _interacted = _asserted = _captured = false;
+            _revision++; _tests = false;
+            if (_requiresUi) _interacted = _asserted = _captured = false;
             LastTestSummary = null;
         }
         var failed = ToolOutcome.IsFailure(result);

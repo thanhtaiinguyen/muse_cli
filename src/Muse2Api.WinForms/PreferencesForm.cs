@@ -11,7 +11,7 @@ internal sealed record ConnectPanelInfo(string BaseUrl, string ApiKey, GatewayCl
 /// <summary>Content-sized settings; a fixed footer stays reachable while content scrolls.</summary>
 internal sealed class PreferencesForm : Form
 {
-    private readonly CheckBox _readOnly, _turbo;
+    private readonly CheckBox _readOnly, _turbo, _projectReview;
     private readonly ComboBox _theme, _shell;
     private readonly ConnectPanelInfo? _connect;
     private readonly SkillStore? _skillStore;
@@ -28,6 +28,8 @@ internal sealed class PreferencesForm : Form
     public event EventHandler? AddAccountRequested;
     public bool ReadOnly => _readOnly.Checked;
     public bool Turbo => _turbo.Checked;
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool ProjectReviewEnabled { get => _projectReview.Checked; set => _projectReview.Checked = value; }
     public int ShellIndex => _shell.SelectedIndex;
     public DesktopTheme.ThemeMode SelectedTheme => _theme.SelectedIndex == 1 ? DesktopTheme.ThemeMode.Light : DesktopTheme.ThemeMode.Dark;
 
@@ -102,6 +104,9 @@ internal sealed class PreferencesForm : Form
         Add(_readOnly);
         _turbo = new CheckBox { Text = "Turbo — tự sửa mã, chạy lệnh và kiểm thử; Esc hoặc Dừng để ngắt", AutoSize = true, Checked = turbo, Enabled = !busy, ForeColor = DesktopTheme.Text };
         Add(_turbo);
+        _projectReview = new CheckBox { Text = "Phản biện dự án — viết mã → đọc lại/phản biện → sửa và kiểm thử lại", AutoSize = true, Enabled = !busy, ForeColor = DesktopTheme.Text };
+        Add(_projectReview, 8);
+        Add(TextBlock("Hai vai trò dùng cùng kết nối Muse. Vai trò phản biện chỉ đọc; vai trò viết mã xử lý các vấn đề cụ thể. Chế độ này dùng thêm lượt AI và chỉ kết thúc khi đủ kiểm chứng.", 9, DesktopTheme.Muted), 16);
         _turbo.CheckedChanged += (_, _) => { if (_turbo.Checked) _readOnly.Checked = false; };
         _readOnly.CheckedChanged += (_, _) => { if (_readOnly.Checked) _turbo.Checked = false; };
         Add(TextBlock("Muse tự quản lý kết nối trên máy; API key ở mục Kết nối OpenAI phía trên chỉ dùng khi bạn muốn gắn ứng dụng khác vào.", 10, DesktopTheme.Muted), 20);
@@ -129,6 +134,7 @@ internal sealed class PreferencesForm : Form
             foreach (var label in labels) label.MaximumSize = new Size(width, 0);
             _readOnly.MaximumSize = new Size(width, 0);
             _turbo.MaximumSize = new Size(width, 0);
+            _projectReview.MaximumSize = new Size(width, 0);
         }
         scroll.SizeChanged += (_, _) => WrapContent(); WrapContent(); ResumeLayout(performLayout: true);
     }

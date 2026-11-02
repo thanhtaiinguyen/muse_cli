@@ -23,12 +23,15 @@ internal static class NativeDesktop
     [DllImport("user32.dll")] internal static extern uint GetWindowThreadProcessId(nint handle, out uint processId);
     [DllImport("user32.dll")] internal static extern bool GetWindowRect(nint handle, out Rect rect);
     [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(nint handle);
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] internal static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] internal static extern bool ShowWindow(nint handle, int command);
     [DllImport("user32.dll")] private static extern uint SendInput(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern nint WindowFromPoint(Point point);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint handle, uint flag);
+    [DllImport("user32.dll", SetLastError = true)] private static extern nint SendMessageTimeout(nint window, uint message, nuint wparam, nint lparam, uint flags, uint timeout, out nuint result);
+    internal static void WarmAccessibility(nint window) => SendMessageTimeout(window, 0x003D, 0, (nint)(-4), 0x0002, 300, out _);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] internal static extern bool RegisterHotKey(nint window, int id, uint modifiers, uint key);
     [DllImport("user32.dll")] internal static extern bool UnregisterHotKey(nint window, int id);
@@ -67,10 +70,22 @@ internal static class NativeDesktop
     {
         validate?.Invoke();
         if (IsIconic(window)) ShowWindow(window, 9);
-        if (GetForegroundWindow() == window) return;
+        var foreground = GetForegroundWindow();
+        if (foreground == window || InScope(window, foreground)) return;
         SetForegroundWindow(window);
-        if (!SpinWait.SpinUntil(() => GetForegroundWindow() == window, 500))
-            throw new InvalidOperationException("Windows chưa cho đưa cửa sổ đích lên trước. Hãy mở cửa sổ đó rồi thử lại.");
+        if (!SpinWait.SpinUntil(() => { var fg = GetForegroundWindow(); return fg == window || InScope(window, fg); }, 500))
+        {
+            var foreThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
+            var appThread = GetWindowThreadProcessId(window, out _);
+            if (foreThread != appThread && foreThread != 0 && appThread != 0)
+            {
+                AttachThreadInput(foreThread, appThread, true);
+                SetForegroundWindow(window);
+                AttachThreadInput(foreThread, appThread, false);
+            }
+            if (!SpinWait.SpinUntil(() => { var fg = GetForegroundWindow(); return fg == window || InScope(window, fg); }, 500))
+                throw new InvalidOperationException("Windows chưa cho đưa cửa sổ đích lên trước. Hãy mở cửa sổ đó rồi thử lại.");
+        }
         validate?.Invoke();
     }
 
@@ -133,13 +148,23 @@ internal static class NativeDesktop
         }
     }
 
-    internal static void Key(nint root, string chord, Action validate)
+    internal static void Key(nint root, string chord, Action validate, int holdMs = 0)
     {
         var keys = ComputerActionPolicy.Keys(chord);
         CheckModifiers(); Focus(ActiveWindow(root), validate); validate();
         if (!InScope(root, GetForegroundWindow())) throw new InvalidOperationException("Cửa sổ nhận phím đã thay đổi.");
-        Send(keys.Select(k => new Input { Type = 1, Data = new() { Keyboard = new() { Key = k } } })
-            .Concat(keys.Reverse().Select(k => new Input { Type = 1, Data = new() { Keyboard = new() { Key = k, Flags = 2 } } })).ToArray());
+        try
+        {
+            Send(keys.Select(k => new Input { Type = 1, Data = new() { Keyboard = new() { Key = k } } }).ToArray());
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < holdMs)
+            {
+                validate();
+                if (!InScope(root, GetForegroundWindow())) throw new InvalidOperationException("Cửa sổ nhận phím đã đổi; đã nhả phím.");
+                Thread.Sleep(Math.Min(15, Math.Max(1, holdMs - (int)timer.ElapsedMilliseconds)));
+            }
+        }
+        finally { Send(keys.Reverse().Select(k => new Input { Type = 1, Data = new() { Keyboard = new() { Key = k, Flags = 2 } } }).ToArray()); }
         // Allow the matching synthetic key-up to reach Windows before the next
         // action checks for user-held modifiers (for example Ctrl+A then type).
         if (!SpinWait.SpinUntil(() => keys.All(k => (GetAsyncKeyState(k) & 0x8000) == 0), 500))
@@ -178,9 +203,22 @@ internal static class NativeDesktop
 
     internal static bool IsUncovered(nint root, Rect rectangle)
     {
+        var insetX = Math.Min(16, Math.Max(4, rectangle.Width / 10));
+        var insetY = Math.Min(16, Math.Max(4, rectangle.Height / 10));
+        var innerWidth = Math.Max(1, rectangle.Width - insetX * 2);
+        var innerHeight = Math.Max(1, rectangle.Height - insetY * 2);
+        var matched = 0;
+        const int total = 48;
         for (var row = 0; row < 6; row++)
+        {
             for (var column = 0; column < 8; column++)
-                if (!InScope(root, WindowFromPoint(new() { X = rectangle.Left + (int)((column + 0.5) * rectangle.Width / 8), Y = rectangle.Top + (int)((row + 0.5) * rectangle.Height / 6) }))) return false;
-        return true;
+            {
+                var pt = new Point { X = rectangle.Left + insetX + (int)((column + 0.5) * innerWidth / 8), Y = rectangle.Top + insetY + (int)((row + 0.5) * innerHeight / 6) };
+                if (InScope(root, WindowFromPoint(pt))) matched++;
+            }
+        }
+        if (matched >= total * 3 / 4) return true;
+        var foreground = GetForegroundWindow();
+        return (foreground == root || InScope(root, foreground)) && matched >= total / 2;
     }
 }

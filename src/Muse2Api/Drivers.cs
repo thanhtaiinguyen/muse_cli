@@ -3,6 +3,12 @@ using System.Text.Json.Nodes;
 
 namespace Muse2Api;
 
+/// <summary>Resolve persisted chat ownership before the pool chooses an account.</summary>
+public interface ILocalConversationOwner
+{
+    string? ResolveConversationOwner(string hint, IReadOnlyList<Account> accounts);
+}
+
 public sealed record InputImage(byte[] Data, string Mime = "image/png");
 public sealed record ChatRequest(string Prompt, string Model, List<InputImage> Images,
     string? ConversationHint, List<(string Role, string Text)> Turns, CancellationToken Cancel, bool LocalTools = false, string? ImageBatchId = null);

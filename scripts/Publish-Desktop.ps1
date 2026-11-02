@@ -27,8 +27,8 @@ function Assert-ReleasePath([string]$Path) {
 }
 
 function Queue-ReleaseSwap {
-    $swapScript = Join-Path $workspaceRoot 'scripts/Swap-Release.ps1'
-    $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $swapScript + '"')
+    $launcher = Join-Path $workspaceRoot 'scripts/Run-Swap-Hidden.vbs'
+    $taskAction = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32/wscript.exe') -Argument ('//B //NoLogo "' + $launcher + '"')
     $taskTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName 'MuseSwapRelease' -Action $taskAction -Trigger $taskTrigger -Description 'Swaps a validated staged Muse release into dist\Muse once Muse has exited.' -Force | Out-Null
     Write-Output ('RELEASE_PENDING=' + $stagingRelease)
@@ -110,6 +110,8 @@ try {
         catch { Write-Warning "Giữ lại bản cũ đang bị khóa: $($release.FullName)" }
     }
     Write-Output ('RELEASE=' + (Join-Path $currentRelease 'Muse.exe'))
+    # A previous deferred job has no work after immediate installation.
+    Complete-MuseSwapTask $workspaceRoot
     Write-Output ('VERSION=' + $expectedVersion)
     Write-Output ('PREVIEW=' + [bool]$Preview)
     Write-Output ('OLD_RELEASES_REMOVED=' + $oldReleases.Count)

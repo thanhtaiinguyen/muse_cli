@@ -25,7 +25,7 @@ namespace Muse2Api;
 /// may still require selector updates in <c>Dom.cs</c>.
 /// </para>
 /// </summary>
-public sealed class BrowserDriver : IMuseDriver
+public sealed class BrowserDriver : IMuseDriver, ILocalConversationOwner
 {
     public event Action<string>? Diagnostic;
     public string Name => "browser";
@@ -59,6 +59,7 @@ public sealed class BrowserDriver : IMuseDriver
     private readonly object _lock = new();
 
     public BrowserDriver(Settings settings) { _settings = settings; _sessions = new(settings.DataDir); _localConversations = new(settings.DataDir); }
+    public string? ResolveConversationOwner(string hint, IReadOnlyList<Account> accounts) => _localConversations.ResolveAccount(hint, accounts);
 
     // ---------- lifecycle ----------
     public async Task StartupAsync()
@@ -351,32 +352,17 @@ public sealed class BrowserDriver : IMuseDriver
     private async Task<System.Text.Json.Nodes.JsonNode?> PageState(IPage page)
         => await Eval(page, Dom.PageState);
 
-    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default, string? localRequestId = null)
+    private async Task<System.Text.Json.Nodes.JsonNode?> ChatState(BrowserTab tab, CancellationToken cancel = default, string? localRequestId = null, bool checkReplyErrors = true)
     {
         if (tab.RateLimited) throw UpstreamException.Quota("Muse returned rate limit (HTTP 429). Conversation retained; no automatic retry or replacement chat.");
         if (tab.Page.IsClosed) throw UpstreamException.ResponseUnavailable("Muse web page closed; stopped waiting. Conversation retained.");
         var state = await Eval(tab.Page, localRequestId is null ? Dom.ChatState : Dom.ReadChatState(localRequestId), cancel)
             ?? throw UpstreamException.ResponseUnavailable("Muse web state unavailable; stopped waiting. Conversation retained.");
         if (BoolNode(state, "rateLimited")) throw UpstreamException.Quota("Muse shows a rate limit notice. Conversation retained; no automatic retry or replacement chat.");
-        if (!string.IsNullOrWhiteSpace(Str(state, "error")))
+        if (checkReplyErrors && !string.IsNullOrWhiteSpace(Str(state, "error")))
             throw UpstreamException.ResponseUnavailable("Muse web stopped responding: " + Str(state, "error"));
-        var tail = Str(state, "tail") ?? "";
-        var low = tail.ToLowerInvariant();
-        foreach (var hint in Dom.QuotaHints)
-        {
-            if (!low.Contains(hint)) continue;
-            var i = low.IndexOf(hint, StringComparison.Ordinal);
-            var snippet = string.Join(" ", tail[Math.Max(0, i - 120)..Math.Min(tail.Length, i + 120)].Split());
-            var reply = Str(state, "lastText") ?? "";
-            if (!BoolNode(state, "generating") && reply.ToLowerInvariant().Contains(hint))
-                throw UpstreamException.Quota(
-                    $"muse.ai reports the account is out of quota: …{snippet}…");
-            if (snippet != tab.QuotaNote)
-            {
-                tab.QuotaNote = snippet;
-                Console.WriteLine($"ignoring quota hint '{hint}' outside the reply: {snippet}");
-            }
-        }
+        // Project source/history may discuss "usage limit" or "out of credits".
+        // Only upstream HTTP 429 or a live notice is quota evidence, not prose.
         return state;
     }
 
@@ -399,7 +385,7 @@ public sealed class BrowserDriver : IMuseDriver
         throw UpstreamException.Timeout("muse.ai page did not become ready");
     }
 
-    private async Task<bool> OnThread(BrowserTab tab)
+    private async Task<bool> OnThread(BrowserTab tab, bool requireIdle = true)
     {
         var href = tab.Page.Url;
         if (!IsThreadUrl(href)) return false;
@@ -408,10 +394,10 @@ public sealed class BrowserDriver : IMuseDriver
             return false;
         var page = await PageState(tab.Page);
         if (!BoolNode(page, "hasInput")) return false;
-        if ((Str(page, "head") ?? "").Contains("Connecting...")) return false;
-        var state = await ChatState(tab);
-        if (BoolNode(state, "generating")) return false;
-        if (Dom.StallHints.Any(h => (Str(state, "tail") ?? "").Contains(h))) return false;
+        if (BoolNode(page, "connecting")) return false;
+        var state = await ChatState(tab, checkReplyErrors: false);
+        if (requireIdle && BoolNode(state, "generating")) return false;
+        if (BoolNode(state, "connecting")) return false;
         return tab.Local || IntNode(state, "agentCount") < HotBubbleLimit;
     }
 
@@ -438,9 +424,12 @@ public sealed class BrowserDriver : IMuseDriver
         while (DateTime.UtcNow < deadline)
         {
             await Task.Delay(250);
-            if (await OnThread(tab)) return;
+            if (await OnThread(tab, requireIdle: !tab.Local)) return;
         }
-        throw UpstreamException.Timeout("saved conversation did not become ready");
+        var page = await PageState(tab.Page);
+        if (Dom.LoginHints.Any(h => (Str(page, "head") ?? "").ToLowerInvariant().Contains(h)))
+            throw UpstreamException.Auth("Saved conversation redirected to login; original account needs authentication.");
+        throw UpstreamException.Refused("Saved Muse conversation could not be opened. It may be unavailable or not accessible to the original account. History retained; no replacement chat was created.", "upstream_conversation_unavailable");
     }
 
     private async Task Attach(BrowserTab tab, List<InputImage> images, CancellationToken cancel = default)
@@ -508,7 +497,7 @@ public sealed class BrowserDriver : IMuseDriver
                     tab.Hint = hint;
                     tab.ThreadUrl = live ? tab.Page.Url : saved!.Url;
                     if (tab.ThreadUrl.Length == 0) throw UpstreamException.Refused("Previous Muse request has no confirmed thread URL. No replacement chat was created; check the existing chat before continuing.");
-                    if (!await OnThread(tab)) await OpenSaved(tab);
+                    if (!await OnThread(tab, requireIdle: false)) await OpenSaved(tab);
                     prompt = Prompt.LocalContinuation(req.Turns);
                     Diagnostic?.Invoke("local_conversation_reused");
                 }
@@ -517,7 +506,9 @@ public sealed class BrowserDriver : IMuseDriver
                     await NewThread(tab); tab.Local = true; tab.Hint = hint;
                     Diagnostic?.Invoke("local_conversation_created");
                 }
-                var state = await ChatState(tab, req.Cancel);
+                var state = await ChatState(tab, req.Cancel, checkReplyErrors: false);
+                if (BoolNode(state, "generating"))
+                    throw UpstreamException.Refused("The previous reply in this Muse conversation is still generating. No new message was submitted; wait for it to finish before continuing.", "upstream_conversation_busy");
                 var imageHash = images.Count == 0 ? "" : Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(images.SelectMany(i => i.Data).ToArray()));
                 // A newly pasted image/capture gets a new ID even if its bytes
                 // match. Repeated context from subsequent tool rounds keeps its
@@ -559,7 +550,7 @@ public sealed class BrowserDriver : IMuseDriver
                     account.Meta.Remove("hot_page");
                 await NewThread(tab);
             }
-            var baseState = await ChatState(tab);
+            var baseState = await ChatState(tab, checkReplyErrors: false);
             await Attach(tab, images, req.Cancel);
             await Send(tab, prompt, req.Cancel);
             return (tab, baseState);
@@ -582,10 +573,15 @@ public sealed class BrowserDriver : IMuseDriver
         var (tab, baseState) = await BeginChat(account, req);
         var baseCount = IntNode(baseState, "agentCount");
         var baseText = Str(baseState, "lastText") ?? "";
+        var baseError = Str(baseState, "error") ?? "";
+        var baseErrorKey = Str(baseState, "errorKey") ?? "";
         var submittedRequestId = Str(baseState, "submittedRequestId") ?? "";
         var baseUserKey = Str(baseState, "userKey") ?? "";
         var baseReplyKeys = (baseState?["replyKeys"] as System.Text.Json.Nodes.JsonArray)?
             .Select(n => n?.GetValue<string>() ?? "").ToHashSet() ?? new HashSet<string>();
+        var baseVersions = (baseState?["replyVersions"] as System.Text.Json.Nodes.JsonArray)?.OfType<System.Text.Json.Nodes.JsonObject>()
+            .ToDictionary(node => node["key"]!.ToString(), node => (Fingerprint: Str(node, "fingerprint") ?? "", MessageId: Str(node, "messageId") ?? ""))
+            ?? new Dictionary<string, (string Fingerprint, string MessageId)>();
         var started = DateTime.UtcNow;
         var emitted = "";
         string? last = null;
@@ -604,16 +600,17 @@ public sealed class BrowserDriver : IMuseDriver
                 req.Cancel.ThrowIfCancellationRequested();
                 var elapsed = (DateTime.UtcNow - started).TotalSeconds;
                 if (elapsed > _settings.ChatTimeout) throw UpstreamException.Timeout("assistant reply timed out");
-                if (!gotFirst && elapsed > _settings.FirstTokenTimeout)
-                    throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.");
                 await Task.Delay(TimeSpan.FromSeconds(PollInterval), req.Cancel);
-                var st = await ChatState(tab, req.Cancel, req.LocalTools ? submittedRequestId : null);
+                var st = await ChatState(tab, req.Cancel, req.LocalTools ? submittedRequestId : null, checkReplyErrors: false);
+                var currentError = Str(st, "error") ?? "";
+                if (currentError.Length > 0 && (currentError != baseError || Str(st, "errorKey") != baseErrorKey))
+                    throw UpstreamException.ResponseUnavailable("Muse web stopped responding: " + currentError);
                 if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
                 else if (sawGenerating) stoppedAt ??= elapsed;
                 var responseText = Str(st, req.LocalTools ? "localReplyText" : "lastText") ?? "";
                 var snapshot = BoolNode(st, "generating") + ":" + responseText;
                 if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
-                if (gotFirst && elapsed - progressAt > _settings.ChatIdleTimeout)
+                if ((gotFirst || sawGenerating) && elapsed - progressAt > _settings.ChatIdleTimeout)
                     throw UpstreamException.ResponseUnavailable("Muse web stopped making progress; no new response data. Conversation retained; no automatic resend.");
                 if (req.LocalTools && elapsed >= diagnosticAt)
                 {
@@ -628,12 +625,18 @@ public sealed class BrowserDriver : IMuseDriver
                     && replyKey.Length > 0 && !baseReplyKeys.Contains(replyKey);
                 var isNew = req.LocalTools
                     ? submittedRequestId.Length > 0 && Str(st, "localRequestId") == submittedRequestId && BoolNode(st, "localReplyBound")
+                        && Str(st, "localReplyKey") is { Length: > 0 } localKey && (!baseReplyKeys.Contains(localKey)
+                            || baseVersions.TryGetValue(localKey, out var oldVersion) && st?["localReplyVersion"] is { } currentVersion
+                            && (Str(currentVersion, "messageId") is { Length: > 0 } messageId && messageId != oldVersion.MessageId
+                                || sawGenerating && Str(currentVersion, "fingerprint") is { Length: > 0 } fingerprint && fingerprint != oldVersion.Fingerprint))
                     : newMessage || IntNode(st, "agentCount") > baseCount || (text.Length > 0 && text != baseText);
+                if (!gotFirst && elapsed > _settings.FirstTokenTimeout && !BoolNode(st, "generating") && (!isNew || text.Length == 0))
+                    throw UpstreamException.ResponseUnavailable("No distinct assistant reply could be read from Muse web before timeout. Conversation retained; no automatic resend.", "upstream_reply_unbound");
                 if (!isNew || text.Length == 0)
                 {
                     if (stoppedAt is { } idleAt && elapsed - idleAt > _settings.ReplyRenderGrace)
-                        throw UpstreamException.ResponseUnavailable("Muse web stopped responding without a completed reply that the app could identify. Conversation retained; no automatic resend.");
-                    if (elapsed > 15 && Dom.StallHints.Any(h => (Str(st, "tail") ?? "").Contains(h)))
+                        throw UpstreamException.ResponseUnavailable($"Muse web stopped responding without a completed reply that the app could identify. bound={BoolNode(st, "localReplyBound")}; bubbles={IntNode(st, "agentCount")}; baseline={baseCount}; chars={text.Length}. Conversation retained; no automatic resend.");
+                    if (elapsed > 15 && BoolNode(st, "connecting"))
                         throw UpstreamException.Timeout("upstream workspace is stuck connecting");
                     continue;
                 }

@@ -146,10 +146,11 @@ public class GoalTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    public async Task GoalRunsRealTestsThenRequiresUiChecksBeforeCompleting(bool repairCycle, bool editRequired)
+    [InlineData(false, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, true, true)]
+    public async Task GoalRunsRealTestsThenRequiresUiChecksBeforeCompleting(bool repairCycle, bool editRequired, bool reviewEnabled)
     {
         if (!OperatingSystem.IsWindows()) return;
         using var dir = new TempDirectory(); var events = new List<AgentEvent>(); var step = 0;
@@ -159,6 +160,11 @@ public class GoalTests
         var tools = new ToolExecutor(dir.Root) { Computer = new UiFixture() };
         var loop = new AgentLoop(tools, (messages, _) =>
         {
+            var state=JsonNode.Parse(messages[^1]["content"]!.ToString()["APP_STATE:\n".Length..])!;
+            if(state["project_review"]?["role"]?.ToString()=="reviewer")
+                return Task.FromResult(state["project_review"]!["fresh_read"]!.GetValue<bool>()
+                    ? ("{\"status\":\"review\",\"verdict\":\"approved\",\"summary\":\"Đã kiểm tra mã và test hiện tại.\",\"findings\":[]}",new List<ToolCall>())
+                    : ("",new List<ToolCall>{Call("read_file","""{"path":"check.cjs"}""")}));
             var turn=step++;
             List<ToolCall> calls = turn switch
             {
@@ -170,7 +176,7 @@ public class GoalTests
                 _ => new(),
             };
             return Task.FromResult((calls.Count == 0 ? "Đã kiểm thử và hoàn tất mục tiêu." : "", calls));
-        }, (_, _) => Task.FromResult(true), events.Add);
+        }, (_, _) => Task.FromResult(true), events.Add){ProjectReviewEnabled=reviewEnabled};
         var expectedCompletion=repairCycle||!editRequired;
         var completed=await loop.RunAsync(editRequired ? "/goal Thêm tính năng phép cộng rồi kiểm thử ứng dụng mẫu" : "/goal Kiểm chứng ứng dụng mẫu");
         Assert.True(expectedCompletion==completed, string.Join("\n",events.Select(e=>e.Kind+": "+e.Text)));

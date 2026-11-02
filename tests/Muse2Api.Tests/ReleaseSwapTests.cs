@@ -4,6 +4,48 @@ namespace Muse2Api.Tests;
 
 public class ReleaseSwapTests
 {
+    [Theory]
+    [InlineData("none",true)] [InlineData("done",true)] [InlineData("busy",false)] [InlineData("foreign-task",false)]
+    public async Task ScheduledSwapRemovesOnlyItsOwnTaskWhenNoWorkRemains(string state,bool shouldRemove)
+    {
+        if(!OperatingSystem.IsWindows())return;
+        using var dir=new TempDirectory();var dist=dir.File("dist");Directory.CreateDirectory(dist);var flag=dir.File("unregistered.txt");
+        var stage=Path.Combine(dist,"Muse.stage."+Guid.NewGuid().ToString("N"));
+        if(state is "done" or "busy"){Directory.CreateDirectory(stage);File.WriteAllText(Path.Combine(stage,"Muse.exe"),"verified fixture");}
+        var taskLauncher=state=="foreign-task"?"C:\\another-project\\scripts\\Run-Swap-Hidden.vbs":dir.File("scripts\\Run-Swap-Hidden.vbs");
+        var script="$ErrorActionPreference='Stop'\n. "+Quote(Path.Combine(Scripts(),"Release-Validation.ps1"))+"\n"
+            +"function Get-ScheduledTask { param($TaskName,$TaskPath,$ErrorAction) [pscustomobject]@{Actions=@([pscustomobject]@{Execute='wscript.exe';Arguments="+Quote("//B //NoLogo \""+taskLauncher+"\"")+"})} }\n"
+            +"function Unregister-ScheduledTask { param($TaskName,$TaskPath,[switch]$Confirm,$ErrorAction) [IO.File]::WriteAllText("+Quote(flag)+",'removed') }\n";
+        if(state is "done" or "busy")script+="Write-MuseReleaseValidation "+Quote(stage)+" "+Quote(dist)+" '9.9.9'\n";
+        script+="function Get-Process { param($Name,$ErrorAction) "+(state=="busy"?"[pscustomobject]@{Path="+Quote(Path.Combine(dist,"Muse","Muse.exe"))+"}":"")+" }\n";
+        script+="& "+Quote(Path.Combine(Scripts(),"Swap-Release.ps1"))+" -WorkspaceRoot "+Quote(dir.Root)+" -ScheduledRun\n";
+        await Run(script,dir.File("test.ps1"));
+        Assert.Equal(shouldRemove,File.Exists(flag));
+        if(state=="busy")Assert.True(Directory.Exists(stage));
+        if(state=="done")Assert.True(File.Exists(Path.Combine(dist,"Muse","Muse.exe")));
+    }
+
+    [Fact]
+    public async Task HiddenLauncherForwardsScheduledRunWithoutAVisibleConsole()
+    {
+        if(!OperatingSystem.IsWindows())return;
+        using var dir=new TempDirectory();var folder=dir.File("ẩn có khoảng trắng");Directory.CreateDirectory(folder);
+        var launcher=Path.Combine(folder,"Run-Swap-Hidden.vbs");File.Copy(Path.Combine(Scripts(),"Run-Swap-Hidden.vbs"),launcher);
+        var flag=Path.Combine(folder,"visible.txt");
+        var script="""
+            param([switch]$ScheduledRun)
+            $ErrorActionPreference='Stop'
+            if (!$ScheduledRun) { exit 17 }
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class WindowProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr handle); }'
+            """+"\n[IO.File]::WriteAllText("+Quote(flag)+",[WindowProbe]::IsWindowVisible([WindowProbe]::GetConsoleWindow()).ToString())\n";
+        await File.WriteAllTextAsync(Path.Combine(folder,"Swap-Release.ps1"),script,new System.Text.UTF8Encoding(true));
+        using var process=new Process {StartInfo=new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),"System32","wscript.exe")){UseShellExecute=false,CreateNoWindow=true}};
+        foreach(var arg in new[]{"//B","//NoLogo",launcher})process.StartInfo.ArgumentList.Add(arg);
+        process.Start();using var timeout=new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        try{await process.WaitForExitAsync(timeout.Token);}catch{process.Kill(entireProcessTree:true);throw;}
+        Assert.Equal(0,process.ExitCode);Assert.Equal("False",await File.ReadAllTextAsync(flag));
+    }
+
     private static string Scripts()
     {
         for(var directory=new DirectoryInfo(AppContext.BaseDirectory);directory is not null;directory=directory.Parent)

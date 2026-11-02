@@ -134,7 +134,7 @@ public sealed class LoginForm : Form
                 if (!cookie.IsSession) entry["expirationDate"] = new DateTimeOffset(DateTime.SpecifyKind(cookie.Expires, DateTimeKind.Utc)).ToUnixTimeSeconds();
                 array.Add(entry);
             }
-            var result = await _client.AddAccountWithCookies(_url(), _adminKey(), _accountLabel, array);
+            var result = await _client.AddAccountWithCookies(_url(), _adminKey(), _accountLabel, array, _savedAccount?.Id);
             if (IsDisposed) return;
             LastAccountId = result?["account"]?["id"]?.GetValue<string>();
             if (LastAccountId is null) throw new InvalidOperationException("No saved account returned");

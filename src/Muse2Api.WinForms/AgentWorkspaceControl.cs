@@ -69,6 +69,7 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _connection = connection; _login = login; _ensureReady = ensureReady; _settings = settings;
         _workspace.AutoEllipsis = true; _projectHint.AutoEllipsis = true;
         _computer.RequestAuthorization = RequestComputerAuthorization;
+        LoadBehavior();
         Dock = DockStyle.Fill; Font = DesktopTheme.Body; BackColor = DesktopTheme.Background; ForeColor = DesktopTheme.Text;
         BuildLayout();
         _models.Items.AddRange(new object[] { "muse-chat", "gpt-4o" });

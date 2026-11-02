@@ -133,12 +133,28 @@ public sealed class AccountPool
     {
         lock (_lock)
         {
-            var existing = Upstream.MissingSessionCookies(incoming.Cookies).Count == 0
-                ? _accounts.Values.FirstOrDefault(a => BrowserSessionStore.AuthenticationHash(a) == BrowserSessionStore.AuthenticationHash(incoming)) : null;
+            Account? existing = null;
+            if (!string.IsNullOrEmpty(incoming.Id) && _accounts.TryGetValue(incoming.Id, out var byId))
+            {
+                existing = byId;
+            }
+            if (existing is null && Upstream.MissingSessionCookies(incoming.Cookies).Count == 0)
+            {
+                existing = _accounts.Values.FirstOrDefault(a => BrowserSessionStore.AuthenticationHash(a) == BrowserSessionStore.AuthenticationHash(incoming));
+            }
+            if (existing is null && _accounts.Count == 1)
+            {
+                var only = _accounts.Values.First();
+                if (string.IsNullOrEmpty(incoming.Label) || incoming.Label == only.Label || string.IsNullOrEmpty(only.Label))
+                {
+                    existing = only;
+                }
+            }
             if (existing is not null)
             {
                 existing.Cookies = incoming.Cookies; existing.CookieExpires = incoming.CookieExpires;
-                existing.Label = incoming.Label; existing.Enabled = incoming.Enabled;
+                if (!string.IsNullOrEmpty(incoming.Label)) existing.Label = incoming.Label;
+                existing.Enabled = incoming.Enabled;
                 if (existing.Status == AccountStatus.Invalid) { existing.Status = AccountStatus.Active; existing.LastError = null; }
                 Persist(); return existing;
             }

@@ -13,6 +13,22 @@ public sealed class LocalConversationStore(string dataDirectory)
 
     public Entry? Load(string accountId, string hint)
     {
+        var entry = Read(hint);
+        if (entry is not null && entry.Account != Hash(accountId))
+            throw UpstreamException.Refused("This conversation belongs to another Muse account. Reconnect that account; no replacement chat was created.", "upstream_conversation_account");
+        return entry;
+    }
+
+    public string? ResolveAccount(string hint, IReadOnlyList<Account> accounts)
+    {
+        var entry = Read(hint);
+        if (entry is null) return null;
+        return accounts.FirstOrDefault(account => Hash(account.Id) == entry.Account)?.Id
+            ?? throw UpstreamException.Refused("The Muse account owning this saved conversation is no longer installed. Restore that account; chat history was preserved.", "upstream_conversation_account");
+    }
+
+    private Entry? Read(string hint)
+    {
         var file = FileFor(hint);
         if (!File.Exists(file)) return null;
         Entry entry;
@@ -20,7 +36,6 @@ public sealed class LocalConversationStore(string dataDirectory)
         catch (Exception ex) when (ex is JsonException or IOException)
         { throw UpstreamException.Refused("Saved Muse conversation cannot be read. No replacement chat was created."); }
         if (entry.Url is null || string.IsNullOrEmpty(entry.Account)) throw UpstreamException.Refused("Saved Muse conversation is incomplete. No replacement chat was created.");
-        if (entry.Account != Hash(accountId)) throw UpstreamException.Refused("This conversation belongs to another Muse account. Reconnect that account; no replacement chat was created.");
         if (entry.Url.Length > 0 && !IsThread(entry.Url)) throw UpstreamException.Refused("Saved Muse conversation URL is invalid. No replacement chat was created.");
         return entry;
     }

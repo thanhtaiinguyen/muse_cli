@@ -15,6 +15,7 @@ public sealed class ChatSession
     public List<JsonObject> History { get; set; } = new();
     public List<AgentEvent> Events { get; set; } = new();
     public GoalRun? Goal { get; set; }
+    public ProjectReview? Review { get; set; }
     public override string ToString() => $"{UpdatedAt.ToLocalTime():dd/MM HH:mm} · {Title}";
 }
 

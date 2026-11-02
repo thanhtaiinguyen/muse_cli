@@ -204,11 +204,11 @@ public sealed class AgentClient : IDisposable
                     var decoded = nativeCalls.OrderBy(entry => entry.Key).Select(entry => NativeCall(entry.Value.Name.ToString(), entry.Value.Arguments.ToString())).ToList();
                     var output = streamed.ToString();
                     var parsed = decoded.Count > 0 ? decoded : ToolCallParser.Parse(output);
-                    return (parsed.Count == 0 ? ToolCallParser.PlannerReply(output) : output, parsed);
+                    return (parsed.Count == 0 && !ToolCallParser.NeedsInput(output) ? ToolCallParser.PlannerReply(output) : output, parsed);
                 }
                 if (data.Length == 0) continue;
                 var chunk = JsonNode.Parse(data) as JsonObject ?? throw new InvalidOperationException("Invalid stream payload");
-                if (chunk["error"] is JsonObject error) throw new InvalidOperationException("LLM stream failed: " + error["message"]?.ToString());
+                if (chunk["error"] is JsonObject error) throw new InvalidOperationException("LLM stream failed: " + error["code"]?.ToString() + ": " + error["message"]?.ToString());
                 if (chunk["choices"] is not JsonArray choices || choices.Count == 0) continue;
                 if (choices[0]?["delta"]?["tool_calls"] is JsonArray functions)
                 {
@@ -250,7 +250,7 @@ public sealed class AgentClient : IDisposable
                 calls.Add(NativeCall(name, fn?["arguments"] is JsonValue av && av.TryGetValue<string>(out var s) ? s : fn?["arguments"]?.ToJsonString() ?? "{}"));
             }
         }
-        return (calls.Count == 0 ? ToolCallParser.PlannerReply(content) : content, calls);
+        return (calls.Count == 0 && !ToolCallParser.NeedsInput(content) ? ToolCallParser.PlannerReply(content) : content, calls);
         }
         catch (OperationCanceledException) when (!callerToken.IsCancellationRequested)
         {

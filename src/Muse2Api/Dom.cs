@@ -11,7 +11,8 @@ namespace Muse2Api;
 public static class Dom
 {
     public const string Input = "textarea";
-    public const string AgentBubble = "div[class*=\"hatch-agent-bubble-bg\"]";
+    public const string AgentBubble = "div[class*=\"hatch-agent-bubble-bg\"],[data-message-author-role=\"assistant\"],[data-role=\"assistant\"],[data-author=\"assistant\"],[data-testid=\"assistant-message\"]";
+    public const string UserBubble = "[data-message-author-role=\"user\"],[data-role=\"user\"],[data-author=\"user\"],[data-testid=\"user-message\"],[class*=\"hatch-user-bubble-bg\"],[class~=\"group/msg\"].ms-auto.items-end";
     public const string Attachment = "[data-testid^=\"hatch-chat-attachment-presentation-\"]";
     public const string StopButton = "button[aria-label*=\"Stop\" i]";
     public const string ApprovalCard = "[data-testid=\"hatch-inline-approval-card\"]";
@@ -27,10 +28,14 @@ public static class Dom
         (() => {
           const body = document.body ? document.body.innerText : '';
           const hydration = document.querySelector('[data-hatch-shell-hydration-state]');
+          const connecting = [...document.querySelectorAll('[role="status"],[aria-live="polite"]')].some(e =>
+            e.getClientRects().length > 0 && !e.closest({{Q(AgentBubble + "," + UserBubble + ",[class~=\"group/msg\"]")}})
+            && /^(?:Connecting\.{0,3}|Still sending|Đang kết nối[.…]*)$/i.test((e.innerText || '').trim()));
           return {
             ready: document.readyState === 'complete' && !!document.querySelector({{Q(Input)}})
                    && (!hydration || hydration.getAttribute('data-hatch-shell-hydration-state') === 'hydrated')
-                   && !body.includes('Connecting...'),
+                   && !connecting,
+            connecting,
             hasInput: !!document.querySelector({{Q(Input)}}),
             path: location.pathname,
             head: body.slice(0, 800),
@@ -67,7 +72,7 @@ public static class Dom
             return (s.overflowY === 'auto' || s.overflowY === 'scroll') && e.scrollHeight > e.clientHeight + 50;
           });
           scrollers.forEach(e => { e.scrollTop = e.scrollHeight; });
-          const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})].filter(visible);
+          const bubbles = [...document.querySelectorAll({{Q(AgentBubble)}})].filter(e => visible(e) && !e.querySelector({{Q(AgentBubble)}}));
           const last = bubbles.length ? replyText(bubbles[bubbles.length - 1]).trim() : '';
           // The site can render a branch with the same bubble count and the
           // same JSON as the previous branch. Establish provenance after the
@@ -75,7 +80,9 @@ public static class Dom
           const ids = window.__museReplyNodeIds ||= { nodes: new WeakMap(), next: 1 };
           const nodeId = e => { if (!e) return ''; if (!ids.nodes.has(e)) ids.nodes.set(e, String(ids.next++)); return ids.nodes.get(e); };
           const groups = [...document.querySelectorAll('[class~="group/msg"]')].filter(visible);
-          const users = groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end') && !e.querySelector({{Q(AgentBubble)}}));
+          const userCandidates = [...new Set([...groups.filter(e => e.classList.contains('ms-auto') && e.classList.contains('items-end') && !e.querySelector({{Q(AgentBubble)}})),
+            ...document.querySelectorAll({{Q(UserBubble)}})])];
+          const users=userCandidates.filter(e => visible(e) && !e.querySelector({{Q(AgentBubble)}}) && !userCandidates.some(other=>other!==e && e.contains(other)));
           const user = users.length ? users[users.length - 1] : null;
           const agent = bubbles.length ? bubbles[bubbles.length - 1] : null;
           const userText = user ? replyText(user).trim() : '';
@@ -84,7 +91,25 @@ public static class Dom
           const userKey = user ? userText.length + ':' + (fingerprint >>> 0) : '';
           const replyAfterUser = !!(user && agent && (user.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING));
           const requestId = {{Q(localRequestId ?? "")}};
-          const owner = requestId ? users.find(e => (e.textContent || '').includes('MUSE_LOCAL_REQUEST_ID: ' + requestId)) : null;
+          const marker = new RegExp('MUSE_LOCAL_REQUEST_ID:\\s*' + requestId + '\\b');
+          const hasMarker = e => marker.test(e.textContent || '');
+          let owner = requestId ? users.find(hasMarker) : null;
+          // Recover the exact transport marker when the site's layout changes.
+          // Never infer ownership from the last assistant text or bubble count.
+          if (requestId && !owner && document.body) {
+            const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+            for(let node;node=walk.nextNode();) {
+              const parent=node.parentElement;
+              if (!(node.nodeValue || '').includes(requestId) || !parent || !visible(parent)
+                || parent.closest('script,style,textarea,input,button') || parent.closest({{Q(AgentBubble)}})) continue;
+              let candidate=parent;
+              for(let depth=0;candidate && depth<8;depth++,candidate=candidate.parentElement) {
+                if(candidate===document.body || candidate.querySelector({{Q(AgentBubble)}})) break;
+                if(hasMarker(candidate)){owner=candidate;users.push(owner);break;}
+              }
+              if(owner) break;
+            }
+          }
           const follows = (a,b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
           // Never bind a historical assistant node to a new local submission,
           // even when hydration/reordering changes its text or bubble count.
@@ -92,6 +117,13 @@ public static class Dom
             && !users.some(u => u !== owner && follows(owner,u) && follows(u,b))) : [];
           const localReply = localReplies.length ? localReplies[localReplies.length-1] : null;
           const localReplyText = localReply ? replyText(localReply).trim() : '';
+          const version = e => {
+            if(!e)return null;
+            const value=replyText(e).trim();let hash=2166136261;
+            for(let i=0;i<value.length;i++)hash=Math.imul(hash ^ value.charCodeAt(i),16777619);
+            const identity=e.closest('[data-message-id],[data-message-key],[data-turn-id]');
+            return {key:nodeId(e),fingerprint:value.length+':'+(hash>>>0),messageId:identity ? (identity.getAttribute('data-message-id') || identity.getAttribute('data-message-key') || identity.getAttribute('data-turn-id') || '') : ''};
+          };
           const atts = [...document.querySelectorAll({{Q(Attachment)}})].map(a => {
             const v = a.querySelector('video'), i = a.querySelector('img');
             const m = v || i;
@@ -105,13 +137,19 @@ public static class Dom
           });
           const tail = document.body ? document.body.innerText.slice(-600) : '';
           const rateLimited = [...document.querySelectorAll('[role="alert"]')].some(e =>
-            e.getClientRects().length > 0 && /too many requests|rate limit|sending (?:messages|requests) too (?:fast|quickly)/i.test(e.textContent || ''));
+            visible(e) && !e.closest({{Q(AgentBubble + "," + UserBubble)}})
+            && /too many requests|rate limit|out of credits|usage limit|limit reached|token limit|sending (?:messages|requests) too (?:fast|quickly)/i.test(e.textContent || ''));
           const buttons = [...document.querySelectorAll('button,[role="button"]')].filter(visible);
           const generating = buttons.some(b => !b.disabled && /^(stop(?: generating| generation| response)?|dừng(?: tạo| phản hồi)?|停止(?:生成)?)(?:[.!…\s]*)$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim()));
-          const error = [...document.querySelectorAll('[role="alert"]')].filter(visible)
-            .map(e => e.innerText || '').find(t => /something went wrong|failed to (?:send|generate)|connection (?:lost|failed)|network error|đã xảy ra lỗi/i.test(t)) || '';
+          const errorNode = [...document.querySelectorAll('[role="alert"]')].filter(visible)
+            .find(e => !e.closest({{Q(AgentBubble + "," + UserBubble)}}) && /something went wrong|failed to (?:send|generate)|connection (?:lost|failed)|network error|đã xảy ra lỗi/i.test(e.innerText || ''));
+          const error=errorNode ? errorNode.innerText : '';
+          const connecting = [...document.querySelectorAll('[role="status"],[aria-live="polite"]')].some(e => visible(e)
+            && !e.closest({{Q(AgentBubble + "," + UserBubble + ",[class~=\"group/msg\"]")}})
+            && /^(?:Connecting\.{0,3}|Still sending|Đang kết nối[.…]*)$/i.test((e.innerText || '').trim()));
           return { agentCount: bubbles.length, lastText: last, replyKey: nodeId(agent), replyKeys: bubbles.map(nodeId), userKey, replyAfterUser, rateLimited, error,
-                    localRequestId: requestId, localReplyBound: !!localReply, localReplyText,
+                    localRequestId: requestId, localReplyBound: !!localReply, localReplyText, localReplyKey: nodeId(localReply), localReplyVersion:version(localReply),
+                    replyVersions: requestId ? [] : bubbles.map(version), errorKey: nodeId(errorNode), connecting,
                     generating,
                     approval: [...document.querySelectorAll({{Q(ApprovalCard)}})].some(visible),
                     attachments: atts, tail };

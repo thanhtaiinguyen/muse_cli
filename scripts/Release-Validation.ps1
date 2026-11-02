@@ -1,4 +1,19 @@
 # Shared by the publisher and deferred swapper. No mutations on import.
+function Complete-MuseSwapTask([string]$WorkspaceRoot) {
+    # Unregister only this workspace's job, including the old visible launcher.
+    # A failed/missing scheduler never invalidates an already verified release.
+    try {
+        $task = Get-ScheduledTask -TaskName 'MuseSwapRelease' -TaskPath '\' -ErrorAction SilentlyContinue
+        if (!$task) { return }
+        $swap = [IO.Path]::GetFullPath((Join-Path $WorkspaceRoot 'scripts/Swap-Release.ps1'))
+        $launcher = [IO.Path]::GetFullPath((Join-Path $WorkspaceRoot 'scripts/Run-Swap-Hidden.vbs'))
+        $owned = @($task.Actions | Where-Object { $_.Arguments -and [IO.Path]::GetFileName($_.Execute) -in @('powershell.exe','wscript.exe') -and
+            ($_.Arguments.IndexOf('"' + $swap + '"', [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $_.Arguments.IndexOf('"' + $launcher + '"', [StringComparison]::OrdinalIgnoreCase) -ge 0) })
+        if ($owned.Count) { Unregister-ScheduledTask -TaskName 'MuseSwapRelease' -TaskPath '\' -Confirm:$false -ErrorAction Stop }
+    }
+    catch { Write-Warning 'Không dọn được tác vụ đổi bản; bản cài đặt và dữ liệu cá nhân vẫn được giữ.' }
+}
+
 function Get-MuseFileHash([string]$Path) {
     $stream = [IO.File]::OpenRead($Path)
     $hasher = [Security.Cryptography.SHA256]::Create()

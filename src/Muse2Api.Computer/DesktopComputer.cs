@@ -52,7 +52,20 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
 {
     public static bool IsRuntimeAvailable => typeof(AutomationElement).Assembly.GetName().Name == "UIAutomationClient";
     public const int EmergencyHotkey = 0x4D55;
-    private readonly Lazy<ComputerWorker> _worker = new(() => new ComputerWorker());
+    private ComputerWorker? _worker;
+    private readonly Lazy<ComputerWorker> _previewWorker = new(() => new ComputerWorker(TimeSpan.FromSeconds(6)));
+    private readonly object _workerLock = new();
+    private int _workerReplacements;
+    private ComputerWorker Worker { get { lock (_workerLock) return _worker ??= new ComputerWorker(TimeSpan.FromSeconds(20)); } }
+    private void RecoverReadWorker(ComputerWorker worker)
+    {
+        lock (_workerLock)
+        {
+            if (_worker != worker) return;
+            if (_workerReplacements++ >= 1) { Disarm(); throw new InvalidOperationException("UI Automation của ứng dụng đích tiếp tục bị treo. Đã dừng điều khiển; không tạo thêm worker hay tự lặp thao tác."); }
+            worker.Dispose(); _worker = null;
+        }
+    }
     private readonly Dictionary<string, AutomationElement> _elements = new();
     private readonly Dictionary<string, (string Name, string AutomationId, string Role)> _identities = new();
     private static readonly JsonSerializerOptions Json = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -137,7 +150,8 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _shutdown.Cancel(); Disarm(); if (_worker.IsValueCreated) _worker.Value.Dispose(); _shutdown.Dispose();
+        _shutdown.Cancel(); Disarm(); lock (_workerLock) { _worker?.Dispose(); }
+        if (_previewWorker.IsValueCreated) _previewWorker.Value.Dispose(); _shutdown.Dispose();
     }
     public static bool RegisterEmergencyStop(nint window) => NativeDesktop.RegisterHotKey(window, EmergencyHotkey, 0x4000, 0x1B);
     public static void UnregisterEmergencyStop(nint window) => NativeDesktop.UnregisterHotKey(window, EmergencyHotkey);
@@ -150,13 +164,13 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
         var target = _target;
         if (target is null) return null;
         var generation = Interlocked.Read(ref _generation);
-        var frame = await _worker.Value.RunAsync(() =>
+        var frame = await _previewWorker.Value.RunAsync(operationToken =>
         {
             using var dpi = NativeDesktop.PhysicalCoordinates();
-            Validate(target, generation, lifetime.Token);
+            Validate(target, generation, operationToken);
             if (!NativeDesktop.InScope((nint)target.Handle, NativeDesktop.GetForegroundWindow())) return null;
-            return Capture(target, generation, lifetime.Token, preview: true).ImageDataUrl;
-        }, Disarm, lifetime.Token, skipWhenBusy: true);
+            return Capture(target, generation, operationToken, preview: true).ImageDataUrl;
+        }, () => { }, lifetime.Token, skipWhenBusy: true);
         lifetime.Token.ThrowIfCancellationRequested();
         return generation == Interlocked.Read(ref _generation) ? frame : null;
     }
@@ -179,7 +193,10 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
         _authorizationRequested = true;
         if (call.Name == "computer_list_windows") return new(JsonSerializer.Serialize(new[] { target }));
         var generation = Interlocked.Read(ref _generation);
-        return await _worker.Value.RunAsync(() => Execute(call, target, generation, cancel), Disarm, cancel);
+        var worker = Worker;
+        var readOnly = call.Name is "computer_inspect" or "computer_screenshot" or "computer_assert";
+        return await worker.RunAsync(operationToken => Execute(call, target, generation, operationToken), Disarm, cancel,
+            timedOut: readOnly ? () => RecoverReadWorker(worker) : null);
     }
 
     private void Validate(DesktopWindow target, long generation, CancellationToken cancel)
@@ -251,7 +268,13 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
         }
         void CheckPoint(NativeDesktop.Point point)
         {
-            Guard(); CheckElement(AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y)), true);
+            Guard();
+            try
+            {
+                var el = AutomationElement.FromPoint(new System.Windows.Point(point.X, point.Y));
+                if (el is not null) CheckElement(el, true);
+            }
+            catch (Exception ex) when (ex is not InvalidOperationException) { }
         }
         // A failed/partial mutation must also invalidate the old image.
         var mutation = ComputerActionPolicy.Mutates(call.Name);
@@ -262,9 +285,10 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
         {
             case "computer_inspect":
                 var active = NativeDesktop.ActiveWindow(window);
+                NativeDesktop.WarmAccessibility(active);
                 if (!NativeDesktop.GetWindowRect(active, out var rect)) throw new InvalidOperationException("Không đọc được vị trí cửa sổ.");
                 var root = S("element_id").Length > 0 ? Element(interactive: false) : AutomationElement.FromHandle(active);
-                _elements.Clear(); _identities.Clear();
+                lock (_workerLock) { Guard(); _elements.Clear(); _identities.Clear(); }
                 var inspection = Guid.NewGuid().ToString("N")[..12];
                 var pending = new Queue<(AutomationElement Element, int Depth)>(); pending.Enqueue((root, 0));
                 var nodes = new List<JsonObject>(); var timer = Stopwatch.StartNew(); var scanned = 0; var matched = 0; var characters = 0; var more = false; var depthLimited = false; var childLimited = false;
@@ -286,15 +310,18 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
                                 var id = "e" + inspection + "_" + nodes.Count;
                                 var box = info.BoundingRectangle;
                                 if (box.IsEmpty || !double.IsFinite(box.X) || !double.IsFinite(box.Y) || !double.IsFinite(box.Width) || !double.IsFinite(box.Height)) box = new System.Windows.Rect(0, 0, 0, 0);
-                                var value = element.TryGetCurrentPattern(ValuePattern.Pattern, out var vp) ? ((ValuePattern)vp).Current.Value : "";
+                                var value = info.ControlType == ControlType.Edit && element.TryGetCurrentPattern(ValuePattern.Pattern, out var vp) ? ((ValuePattern)vp).Current.Value : "";
                                 var node = JsonSerializer.SerializeToNode(new { element_id = id, depth, name = Limit(info.Name), automation_id = Limit(info.AutomationId),
                                     role = info.ControlType.ProgrammaticName, enabled = info.IsEnabled, offscreen = info.IsOffscreen,
                                     value = Limit(value), bounds = new { x = box.X - rect.Left, y = box.Y - rect.Top, width = box.Width, height = box.Height },
-                                    patterns = element.GetSupportedPatterns().Take(16).Select(p => p.ProgrammaticName).ToArray() }, Json)!.AsObject();
+                                    patterns = info.IsOffscreen || !info.IsEnabled ? Array.Empty<string>() : element.GetSupportedPatterns().Take(16).Select(p => p.ProgrammaticName).ToArray() }, Json)!.AsObject();
                                 var cost = node.ToJsonString(Json).Length;
                                 if (characters + cost > 40000 && nodes.Count > 0) { more = true; break; }
-                                characters += cost; nodes.Add(node); _elements[id] = element;
-                                _identities[id] = (info.Name, info.AutomationId, info.ControlType.ProgrammaticName);
+                                lock (_workerLock)
+                                {
+                                    Guard(); characters += cost; nodes.Add(node); _elements[id] = element;
+                                    _identities[id] = (info.Name, info.AutomationId, info.ControlType.ProgrammaticName);
+                                }
                             }
                         }
                         if (depth >= maxDepth) { depthLimited = true; continue; }
@@ -306,7 +333,7 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
                     }
                     catch (ElementNotAvailableException) { }
                 }
-                _inspectedAt = DateTime.UtcNow;
+                Guard(); _inspectedAt = DateTime.UtcNow;
                 return new(JsonSerializer.Serialize(new { window = target.Title, active_window = active.ToInt64(), inspection_id = inspection,
                     coordinate_space = "window physical pixels; NOT scaled screenshot pixels. Prefer element_id. Read image_scale from ui_image before using physical bounds for image coordinates.",
                     elements = nodes, scanned, next_offset = (more || pending.Count > 0) && nodes.Count > 0 ? offset + nodes.Count : (int?)null,
@@ -320,7 +347,19 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
                 break;
             case "computer_invoke":
                 var clickable = Element();
-                if (!clickable.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke)) throw new InvalidOperationException("Phần tử không hỗ trợ bấm trực tiếp. Hãy đọc vùng con hoặc dùng ảnh mới để bấm theo tọa độ.");
+                if (!clickable.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke))
+                {
+                    var invokeBox = clickable.Current.BoundingRectangle;
+                    if (invokeBox.Width > 0 && invokeBox.Height > 0)
+                    {
+                        var cx = (int)(invokeBox.Left + invokeBox.Width / 2);
+                        var cy = (int)(invokeBox.Top + invokeBox.Height / 2);
+                        NativeDesktop.Focus(NativeDesktop.ActiveWindow(window), Guard);
+                        NativeDesktop.Click(window, cx, cy, false, false, Guard);
+                        break;
+                    }
+                    throw new InvalidOperationException("Phần tử không hỗ trợ bấm trực tiếp. Hãy đọc vùng con hoặc dùng ảnh mới để bấm theo tọa độ.");
+                }
                 Validate(target, generation, cancel); ((InvokePattern)invoke).Invoke(); break;
             case "computer_set_value":
                 var editable = Element();
@@ -337,7 +376,7 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
                 NativeDesktop.Type(window, S("text"), () => { Guard(); if (!Focused().Equals(input)) throw new InvalidOperationException("Ô nhận phím đã đổi. Đã dừng nhập để tránh gõ nhầm."); }); break;
             case "computer_key":
                 NativeDesktop.Focus(NativeDesktop.ActiveWindow(window), Guard); _ = Focused();
-                NativeDesktop.Key(window, S("key"), () => { Guard(); _ = Focused(); }); break;
+                NativeDesktop.Key(window, S("key"), Guard, args["hold_ms"]?.GetValue<int>() ?? (S("key").StartsWith("CTRL+", StringComparison.OrdinalIgnoreCase) ? 0 : 80)); break;
             case "computer_toggle":
                 var checkbox = Element();
                 if (!checkbox.TryGetCurrentPattern(TogglePattern.Pattern, out var toggler)) throw new InvalidOperationException("The element cannot be toggled.");
@@ -370,7 +409,20 @@ public sealed class DesktopComputer : IComputerTools, IDisposable
                 }
                 break;
             case "computer_click":
-                var point = Point("x", "y"); NativeDesktop.Focus(NativeDesktop.ActiveWindow(window), Guard); CheckPoint(point);
+                NativeDesktop.Point point;
+                if (S("element_id").Length > 0 && args["x"] is null && args["y"] is null)
+                {
+                    var el = Element();
+                    var clickBox = el.Current.BoundingRectangle;
+                    if (clickBox.Width <= 0 || clickBox.Height <= 0)
+                        throw new InvalidOperationException("Phần tử không có tọa độ hiển thị hợp lệ trên màn hình.");
+                    point = new NativeDesktop.Point { X = (int)(clickBox.Left + clickBox.Width / 2), Y = (int)(clickBox.Top + clickBox.Height / 2) };
+                }
+                else
+                {
+                    point = Point("x", "y");
+                }
+                NativeDesktop.Focus(NativeDesktop.ActiveWindow(window), Guard); CheckPoint(point);
                 NativeDesktop.Click(window, point.X, point.Y, args["double_click"]?.GetValue<bool>() == true, S("button") == "right", Guard); break;
             case "computer_drag":
                 var from = Point("x", "y"); var to = Point("to_x", "to_y");

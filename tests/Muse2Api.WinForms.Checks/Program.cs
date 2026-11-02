@@ -11,6 +11,14 @@ static class Program
     }
     static async Task Check()
     {
+        var copy=typeof(MainForm).Assembly.GetType("Muse2Api.WinForms.DesktopCopy")!.GetMethod("FriendlyError")!;
+        foreach(var pair in new[]{("upstream_conversation_busy","chưa gửi tin mới"),("upstream_conversation_account","tài khoản gốc"),("upstream_reply_unbound","chưa xác định"),("upstream_conversation_unavailable","chat gốc")})
+        {
+            var message=(string)copy.Invoke(null,new object[]{"LLM stream failed: "+pair.Item1+": diagnostic"})!;
+            Require(message.Contains(pair.Item2),"Chat resumption error lost its actionable reason: "+pair.Item1);
+            Require(!message.Contains("hết lượt"),"Conversation/readback error was mislabeled as quota exhaustion");
+        }
+        Console.WriteLine("PASS: old-chat busy/owner/unavailable/readback failures have distinct Vietnamese explanations");
         await CheckPreviewIsolation();
         CheckComputerPicker();
         await CheckUpdateSettings();

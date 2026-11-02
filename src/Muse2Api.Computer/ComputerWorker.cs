@@ -21,7 +21,10 @@ internal sealed class ComputerWorker : IDisposable
         thread.SetApartmentState(ApartmentState.MTA); thread.Start();
     }
 
-    public async Task<T> RunAsync<T>(Func<T> action, Action stop, CancellationToken cancel, bool skipWhenBusy = false)
+    public Task<T> RunAsync<T>(Func<T> action, Action stop, CancellationToken cancel, bool skipWhenBusy = false)
+        => RunAsync(_ => action(), stop, cancel, skipWhenBusy);
+
+    public async Task<T> RunAsync<T>(Func<CancellationToken, T> action, Action stop, CancellationToken cancel, bool skipWhenBusy = false, Action? timedOut = null)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (!await _gate.WaitAsync(skipWhenBusy ? TimeSpan.Zero : _queueTimeout, cancel))
@@ -37,7 +40,7 @@ internal sealed class ComputerWorker : IDisposable
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
             _queue.Add(() =>
             {
-                try { operationToken.ThrowIfCancellationRequested(); completion.TrySetResult(action()); }
+                try { operationToken.ThrowIfCancellationRequested(); completion.TrySetResult(action(operationToken)); }
                 catch (OperationCanceledException) { completion.TrySetCanceled(); }
                 catch (Exception ex) { completion.TrySetException(ex); }
                 finally { _gate.Release(); }
@@ -46,7 +49,12 @@ internal sealed class ComputerWorker : IDisposable
         catch { _gate.Release(); throw; }
         _ = completion.Task.ContinueWith(t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
         try { return await completion.Task.WaitAsync(_operationTimeout, cancel); }
-        catch (TimeoutException) { operation.Cancel(); stop(); throw new InvalidOperationException("Ứng dụng đích hoặc UI Automation không phản hồi. Đã thu hồi quyền điều khiển; không tự gửi lại thao tác."); }
+        catch (TimeoutException)
+        {
+            operation.Cancel(); (timedOut ?? stop)();
+            throw new InvalidOperationException(timedOut is null ? "Ứng dụng đích hoặc UI Automation không phản hồi. Đã thu hồi quyền điều khiển; không tự gửi lại thao tác."
+                : "ui_read_timeout: Đọc UI Automation quá lâu; đã hủy lần đọc và làm mới worker một lần. Thử đọc vùng nhỏ (max_depth=3, limit=30). Không coi đây là test đạt.");
+        }
         catch (OperationCanceledException) { operation.Cancel(); stop(); throw; }
     }
 

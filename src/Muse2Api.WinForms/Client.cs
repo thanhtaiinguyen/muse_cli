@@ -69,13 +69,17 @@ public sealed class GatewayClient : IDisposable
     /// <summary>Same endpoint, but cookies as a structured list
     /// [{name, value, expirationDate}] so expiry is preserved.
     /// Used by the WebView2 login flow; never log the values.</summary>
-    public Task<JsonNode?> AddAccountWithCookies(string url, string adminKey, string label, JsonArray cookies)
-        => Request(url + "/admin/accounts", adminKey, new JsonObject
+    public Task<JsonNode?> AddAccountWithCookies(string url, string adminKey, string label, JsonArray cookies, string? id = null)
+    {
+        var payload = new JsonObject
         {
             ["label"] = label,
             ["cookies"] = cookies,
             ["reuse_session"] = true,
-        });
+        };
+        if (!string.IsNullOrWhiteSpace(id)) payload["id"] = id;
+        return Request(url + "/admin/accounts", adminKey, payload);
+    }
 
     /// <summary>Accounts the gateway knows, masked by the gateway itself.
     /// Returns (id, label, status, enabled) in gateway order. Every enabled

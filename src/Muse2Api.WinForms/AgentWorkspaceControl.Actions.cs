@@ -107,11 +107,19 @@ public sealed partial class AgentWorkspaceControl
                 {
                     case "user":
                         pendingTool?.SetResult("error: Lượt trước chưa có kết quả xác minh.", true); pendingTool = null;
-                        pendingAnswer = null;
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer))
+                        {
+                            _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                            pendingAnswer = null;
+                        }
                         _chat.AddUserMessage(item.Text);
                         break;
                     case "tool_start":
-                        pendingAnswer = null;
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer))
+                        {
+                            _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                            pendingAnswer = null;
+                        }
                         pendingTool?.SetResult("error: Chưa có kết quả cho thao tác này.", true);
                         pendingTool = _chat.AddToolCall(item.Tool ?? "tool", item.Path, item.Text);
                         pendingTool.ViewDetailsClicked += () => ToggleDrawer(2, forceOpen: true);
@@ -121,7 +129,8 @@ public sealed partial class AgentWorkspaceControl
                         pendingTool?.SetResult(item.Text, ToolOutcome.IsFailure(item.Text)); pendingTool = null;
                         break;
                     case "assistant":
-                        pendingAnswer = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(item.Text));
+                        var extracted = ToolCallParser.PlannerReply(ToolCallParser.StripToolBlocks(item.Text));
+                        if (!string.IsNullOrWhiteSpace(extracted)) pendingAnswer = extracted;
                         break;
                     case "completed":
                     case "waiting_input":
@@ -133,11 +142,20 @@ public sealed partial class AgentWorkspaceControl
                     case "declined":
                     case "cancelled":
                         pendingTool?.SetResult("error: Lượt xử lý đã dừng trước khi có kết quả.", true); pendingTool = null;
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer))
+                        {
+                            _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                            pendingAnswer = null;
+                        }
                         _chat.AddNotice(item.Kind == "error" ? DesktopCopy.FriendlyError(item.Text) : item.Text);
-                        pendingAnswer = null;
                         break;
                 }
                 if (item.Kind is "tool_start" or "tool_result" or "terminal_result" or "command_output" or "error" or "cancelled" or "incomplete" or "declined" or "protocol_error") AppendConsole(item.Text + "\n");
+            }
+            if (!string.IsNullOrWhiteSpace(pendingAnswer))
+            {
+                _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                pendingAnswer = null;
             }
             pendingTool?.SetResult("error: Chưa có kết quả xác minh trong lịch sử.", true);
             UpdateWelcome();
@@ -367,7 +385,8 @@ public sealed partial class AgentWorkspaceControl
         _activeAssistantCard = null;
         using var client = new AgentClient(connection.BaseUrl, model, connection.ApiKey, _session.Id);
         var loop = new AgentLoop(_tools!, (messages, token) => client.ChatAsync(messages, token, _ => { }),
-            ConfirmTool, Publish) { Goal = _session.Goal, SkillsDirectory = Path.Combine(DesktopDataPaths.Root, "Skills") };
+            ConfirmTool, Publish) { Goal = _session.Goal, Review = _session.Review, ProjectReviewEnabled = _projectReviewEnabled,
+                SaveCheckpoint = SaveAgentCheckpoint, SkillsDirectory = Path.Combine(DesktopDataPaths.Root, "Skills") };
         loop.History.AddRange(_session.History.Select(m => (JsonObject)m.DeepClone()));
         var archiveEvents = _session.Events.Take(_session.Events.Count - 1).ToArray();
         try
@@ -380,7 +399,25 @@ public sealed partial class AgentWorkspaceControl
                 await loop.RunAsync(prompt, cancel, pastedImages);
             }, cancel);
         }
-        finally { _session.History = loop.History.Select(m => (JsonObject)m.DeepClone()).ToList(); _session.Goal = loop.Goal; }
+        finally { _session.History = loop.History.Select(m => (JsonObject)m.DeepClone()).ToList(); _session.Goal = loop.Goal; _session.Review = loop.Review; }
+    }
+
+    private Task SaveAgentCheckpoint(AgentCheckpoint checkpoint, CancellationToken cancel)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Post(async () =>
+        {
+            try
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (_session is null) throw new InvalidOperationException("Không còn phiên chat để lưu tiến trình.");
+                DrainEvents(); _session.History = checkpoint.History; _session.Goal = checkpoint.Goal; _session.Review = checkpoint.Review;
+                await _store.SaveAsync(_session, cancel); completion.TrySetResult();
+            }
+            catch (OperationCanceledException) { completion.TrySetCanceled(cancel); }
+            catch (Exception ex) { completion.TrySetException(new IOException("Không lưu được tiến trình chat; đã dừng để tránh mất dữ liệu.", ex)); }
+        });
+        return completion.Task.WaitAsync(cancel);
     }
 
     private async Task RunManualCommand(CancellationToken cancel)
@@ -471,6 +508,11 @@ public sealed partial class AgentWorkspaceControl
                     AppendConsole(item.Text + "\n");
                     _state.Text = "Goal đang chạy — xây dựng, kiểm thử và vá lỗi…";
                     if (_activeThinking == null) _activeThinking = _chat.AddThinking("Đang thực hiện goal…");
+                    break;
+                case "review":
+                    AppendConsole(item.Text + "\n"); _state.Text = item.Text;
+                    if (_activeThinking is null) _activeThinking = _chat.AddThinking(item.Text);
+                    else _activeThinking.AddThought(item.Text);
                     break;
                 case "context_compacted":
                     AppendConsole(item.Text + "\n");

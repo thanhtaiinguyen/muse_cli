@@ -7,7 +7,7 @@ namespace Muse2Api;
 
 public static class Endpoints
 {
-    public const string Version = "0.9.1";
+    public const string Version = "0.10.0";
 
     public static void Map(WebApplication app, AppState s)
     {
@@ -961,6 +961,8 @@ public static class Endpoints
             CookieExpires = expires,
             Enabled = body["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var e) ? e : true,
         };
+        if (JsonHelp.Str(body["id"]) is string id && !string.IsNullOrWhiteSpace(id))
+            acc.Id = id;
         foreach (var (k, v) in expires.ToList())
             if (body["cookie_expires"] is JsonObject extra && extra[k] is not null)
                 acc.CookieExpires[k] = JsonHelp.Long(extra[k]);

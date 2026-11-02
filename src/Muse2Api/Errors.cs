@@ -50,8 +50,8 @@ public class UpstreamException : MuseException
         => new(message, 504, "upstream_timeout");
     // A DOM/readback problem is not evidence that the account is rate limited.
     // The upstream may already have accepted this request; never auto-resubmit.
-    public static UpstreamException ResponseUnavailable(string message)
-        => new(message, 502, "upstream_response_unavailable", retryable: false);
-    public static UpstreamException Refused(string message)
-        => new(message, 502, "upstream_refused", retryable: false);
+    public static UpstreamException ResponseUnavailable(string message, string code = "upstream_response_unavailable")
+        => new(message, 502, code, retryable: false);
+    public static UpstreamException Refused(string message, string code = "upstream_refused")
+        => new(message, 502, code, retryable: false);
 }
