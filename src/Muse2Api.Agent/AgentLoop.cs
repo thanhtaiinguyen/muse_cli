@@ -186,9 +186,13 @@ public sealed class AgentLoop
                             ["instructions"] = GoalRun.Instructions, ["verification"] = verification.Snapshot() },
                         ["remaining"] = (required & ~evidence).ToString(), ["computer_scope"] = _tools.Computer?.Context ?? "unavailable",
                         ["owned_processes"] = _tools.OwnedProcessContext(),
-                        ["next"] = required == LocalWork.None
-                            ? "Respond to the current user message in Vietnamese. For discussion, advice or a comment, return status done with the actual answer in summary and no actions. Resolve references such as continue using conversation_context, but only propose actions requested by the current user; do not execute historical tasks for a casual comment. Do not claim unobserved execution."
-                            : "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.",
+                        ["next"] = review?.IsReviewer == true
+                            ? (!review.FreshRead
+                                ? "You are in REVIEWER role. Call read_file or git_diff now in a JSON code fence to inspect the modified code before concluding. Do not return status done or empty actions."
+                                : "You are in REVIEWER role and have inspected the current files. Now output your independent review report in a JSON code fence with format {\"status\":\"review\",\"verdict\":\"approved\"|\"changes_requested\",\"summary\":\"...\",\"findings\":[...]}. Cite exact files and line numbers.")
+                            : required == LocalWork.None
+                                ? "Respond to the current user message in Vietnamese. For discussion, advice or a comment, return status done with the actual answer in summary and no actions. Resolve references such as continue using conversation_context, but only propose actions requested by the current user; do not execute historical tasks for a casual comment. Do not claim unobserved execution."
+                                : "Generate the next operation as JSON data for the app. Continue after reading; ask only for information genuinely missing. Do not claim native execution of supplied observations.",
                     }.ToJsonString(),
                 });
                 var (text, calls) = await _chat(request, cancel);
@@ -267,6 +271,36 @@ public sealed class AgentLoop
                             _observe(new("protocol_retry", "Đang bổ sung bằng chứng phản biện…")); continue;
                         }
                     }
+                    // If ProjectReview is enabled and coder has performed edits or verified commands,
+                    // trigger REVIEWER immediately before checking needsInput or missing UI checks!
+                    if (ProjectReviewEnabled && (review is null || review.Phase == "coder")
+                        && (review?.Revision > 0 || _tools.LastFileChangeApplied || evidence.HasFlag(LocalWork.Edit) || evidence.HasFlag(LocalWork.CommandVerified) || verification is not null))
+                    {
+                        if (review is null)
+                        {
+                            review = Review = new() { Objective = Goal?.Objective ?? prompt };
+                            review.Resume();
+                        }
+                        if (review.Phase == "coder")
+                        {
+                            review.StartReview(visible); protocolRetries = scopeRetries = 0;
+                            messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
+                            messages.Add(new()
+                            {
+                                ["role"] = "user",
+                                ["content"] = "LOCAL EXECUTOR: Switch to REVIEWER role.\n"
+                                    + "CODER candidate has completed its draft/checks. Now act as independent REVIEWER.\n"
+                                    + "1. First, call read_file or git_diff to independently inspect the modified files before judging.\n"
+                                    + "2. Check correctness, acceptance criteria, tests, and potential regressions.\n"
+                                    + "3. Output your review findings and verdict in a JSON fence.\n"
+                                    + ProjectReview.Instructions
+                            });
+                            _observe(new("review", "Đang phản biện — đọc lại mã và đối chiếu kết quả kiểm thử…"));
+                            _observe(new("review_switch", "Chuyển sang vai trò Phản biện dự án: Đang đọc lại mã nguồn để thẩm định độc lập…", "reviewer"));
+                            continue;
+                        }
+                    }
+
                     if (verification is not null && verification.Missing.Count > 0 && !needsInput)
                     {
                         messages[^1]["content"] = "[Unverified reply: goal checks are still missing.]\n" + text;
@@ -306,23 +340,6 @@ public sealed class AgentLoop
                                 + $"Use a JSON code block with actions in the application schema. Wait for the external local result. Current task: {prompt}",
                         });
                         continue;
-                    }
-                    if (ProjectReviewEnabled && !needsInput && (review is not null || _tools.LastFileChangeApplied || evidence != LocalWork.None))
-                    {
-                        if (review is null)
-                        {
-                            review = Review = new() { Objective = Goal?.Objective ?? prompt };
-                            review.Resume();
-                        }
-                        if (review.Phase == "coder")
-                        {
-                            review.StartReview(visible); protocolRetries = scopeRetries = 0;
-                            messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
-                            messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Switch to REVIEWER role.\nCODER candidate is ready. Switch to REVIEWER, read the current project files/diff and independently assess acceptance criteria and actual verification receipts. " + ProjectReview.Instructions });
-                            _observe(new("review", "Đang phản biện — đọc lại mã và đối chiếu kết quả kiểm thử…"));
-                            _observe(new("review_switch", "Chuyển sang vai trò Phản biện dự án: Đang đọc lại mã và đối chiếu kết quả kiểm thử…", "reviewer"));
-                            continue;
-                        }
                     }
                     _observe(new("assistant", verification is null || needsInput ? visible
                         : visible + "\n\nGoal đã được kiểm chứng bằng test tự động và thao tác/xác nhận/ảnh giao diện.\n" + verification.LastTestSummary));

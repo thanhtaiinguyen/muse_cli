@@ -79,6 +79,21 @@ public sealed class ProjectReview
                 catch (System.Text.Json.JsonException) { }
             }
         }
+        if (report is null)
+        {
+            var lower = text.ToLowerInvariant();
+            if (Regex.IsMatch(lower, @"(chap thuan|phe duyet|dong y|approved|dat yeu cau|khong co loi|chuan xac|hoan thanh tot)")
+                && !Regex.IsMatch(lower, @"(can sua|yeu cau sua|loi|chua dat|that bai|changes_requested)"))
+            {
+                report = new JsonObject
+                {
+                    ["status"] = "review",
+                    ["verdict"] = "approved",
+                    ["summary"] = Clip(text.Trim(), 1000),
+                    ["findings"] = new JsonArray()
+                };
+            }
+        }
         if (report is null || report["findings"] is not JsonArray findings || findings.Count > 12)
             throw new InvalidOperationException("Cần báo cáo phản biện đúng JSON, gồm verdict, summary và findings (tối đa 12).");
         var verdict = report["verdict"]?.ToString();

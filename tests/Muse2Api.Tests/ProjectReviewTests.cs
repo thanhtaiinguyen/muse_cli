@@ -113,4 +113,31 @@ public class ProjectReviewTests
         Assert.Contains(events, e => e.Kind == "review_switch");
         Assert.Contains(events, e => e.Kind == "review_verdict");
     }
+
+    [Fact]
+    public async Task CoderEndingWithQuestionStillTriggersReviewerBeforeWaitingInput()
+    {
+        using var dir = new TempDirectory(); File.WriteAllText(dir.File("app.txt"), "legacy"); var step = 0; var events = new List<AgentEvent>();
+        var loop = new AgentLoop(new ToolExecutor(dir.Root), (messages, _) =>
+        {
+            var state = JsonNode.Parse(messages[^1]["content"]!.ToString()["APP_STATE:\n".Length..])!;
+            var role = state["project_review"]!["role"]!.ToString();
+            var current = step++;
+            Assert.Equal(current is 2 or 3 ? "reviewer" : "coder", role);
+            return Task.FromResult(current switch
+            {
+                0 => Actions(Read(), Write("upgraded")),
+                1 => ("Đã hoàn thành phần code. Bạn có muốn tiếp tục kiểm thử giao diện không?", new List<ToolCall>()),
+                2 => Actions(Read()),
+                _ => (Approved, new List<ToolCall>()),
+            });
+        }, (_, _) => Task.FromResult(true), events.Add) { ProjectReviewEnabled = true };
+
+        Assert.True(await loop.RunAsync("phát triển studio render 3D"), string.Join('\n', events.Select(e => e.Kind + ":" + e.Text)));
+        Assert.Equal("upgraded", File.ReadAllText(dir.File("app.txt")));
+        Assert.Equal("accepted", loop.Review!.Phase);
+        Assert.Contains(events, e => e.Kind == "review_switch");
+        Assert.Contains(events, e => e.Kind == "review_verdict");
+        Assert.DoesNotContain(events.TakeWhile(e => e.Kind != "review_verdict"), e => e.Kind == "waiting_input");
+    }
 }
