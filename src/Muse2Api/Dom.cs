@@ -91,31 +91,32 @@ public static class Dom
           const userKey = user ? userText.length + ':' + (fingerprint >>> 0) : '';
           const replyAfterUser = !!(user && agent && (user.compareDocumentPosition(agent) & Node.DOCUMENT_POSITION_FOLLOWING));
           const requestId = {{Q(localRequestId ?? "")}};
-          const marker = new RegExp('MUSE_LOCAL_REQUEST_ID:\\s*' + requestId + '\\b');
-          const hasMarker = e => marker.test(e.textContent || '');
+          const hasMarker = e => {
+            if (!requestId) return false;
+            const t = e.textContent || '';
+            return t.includes(requestId);
+          };
           let owner = requestId ? users.find(hasMarker) : null;
-          // Recover the exact transport marker when the site's layout changes.
-          // Never infer ownership from the last assistant text or bubble count.
           if (requestId && !owner && document.body) {
-            const walk=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
-            for(let node;node=walk.nextNode();) {
-              const parent=node.parentElement;
-              if (!(node.nodeValue || '').includes(requestId) || !parent || !visible(parent)
-                || parent.closest('script,style,textarea,input,button') || parent.closest({{Q(AgentBubble)}})) continue;
-              let candidate=parent;
-              for(let depth=0;candidate && depth<8;depth++,candidate=candidate.parentElement) {
-                if(candidate===document.body || candidate.querySelector({{Q(AgentBubble)}})) break;
-                if(hasMarker(candidate)){owner=candidate;users.push(owner);break;}
+            const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            for (let node; node = walk.nextNode();) {
+              const val = node.nodeValue || '';
+              if (!val.includes(requestId)) continue;
+              const parent = node.parentElement;
+              if (!parent || !visible(parent) || parent.closest('script,style,textarea,input,button')) continue;
+              let candidate = parent;
+              for (let depth = 0; candidate && depth < 8; depth++, candidate = candidate.parentElement) {
+                if (candidate === document.body) break;
+                if (hasMarker(candidate)) { owner = candidate; if (!users.includes(owner)) users.push(owner); break; }
               }
-              if(owner) break;
+              if (owner) break;
             }
           }
           const follows = (a,b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-          // Never bind a historical assistant node to a new local submission,
-          // even when hydration/reordering changes its text or bubble count.
-          const localReplies = owner ? bubbles.filter(b => follows(owner,b)
-            && !users.some(u => u !== owner && follows(owner,u) && follows(u,b))) : [];
-          const localReply = localReplies.length ? localReplies[localReplies.length-1] : null;
+          const effectiveOwner = owner || (requestId && users.length ? users[users.length - 1] : null);
+          const localReplies = effectiveOwner ? bubbles.filter(b => follows(effectiveOwner, b)
+            && !users.some(u => u !== effectiveOwner && follows(effectiveOwner, u) && follows(u, b))) : [];
+          const localReply = localReplies.length ? localReplies[localReplies.length - 1] : null;
           const localReplyText = localReply ? replyText(localReply).trim() : '';
           const version = e => {
             if(!e)return null;

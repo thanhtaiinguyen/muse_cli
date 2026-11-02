@@ -607,7 +607,9 @@ public sealed class BrowserDriver : IMuseDriver, ILocalConversationOwner
                     throw UpstreamException.ResponseUnavailable("Muse web stopped responding: " + currentError);
                 if (BoolNode(st, "generating")) { sawGenerating = true; stoppedAt = null; }
                 else if (sawGenerating) stoppedAt ??= elapsed;
-                var responseText = Str(st, req.LocalTools ? "localReplyText" : "lastText") ?? "";
+                var localReplyText = Str(st, "localReplyText") ?? "";
+                var lastText = Str(st, "lastText") ?? "";
+                var responseText = (req.LocalTools && BoolNode(st, "localReplyBound") ? localReplyText : lastText).Trim();
                 var snapshot = BoolNode(st, "generating") + ":" + responseText;
                 if (snapshot != progress) { progress = snapshot; progressAt = elapsed; }
                 if ((gotFirst || sawGenerating) && elapsed - progressAt > _settings.ChatIdleTimeout)
@@ -623,9 +625,10 @@ public sealed class BrowserDriver : IMuseDriver, ILocalConversationOwner
                 var replyKey = Str(st, "replyKey") ?? "";
                 var newMessage = BoolNode(st, "replyAfterUser") && currentUserKey.Length > 0 && currentUserKey != baseUserKey
                     && replyKey.Length > 0 && !baseReplyKeys.Contains(replyKey);
+                var localKey = Str(st, "localReplyKey") ?? "";
                 var isNew = req.LocalTools
                     ? submittedRequestId.Length > 0 && Str(st, "localRequestId") == submittedRequestId && BoolNode(st, "localReplyBound")
-                        && Str(st, "localReplyKey") is { Length: > 0 } localKey && (!baseReplyKeys.Contains(localKey)
+                        && localKey.Length > 0 && (!baseReplyKeys.Contains(localKey)
                             || baseVersions.TryGetValue(localKey, out var oldVersion) && st?["localReplyVersion"] is { } currentVersion
                             && (Str(currentVersion, "messageId") is { Length: > 0 } messageId && messageId != oldVersion.MessageId
                                 || sawGenerating && Str(currentVersion, "fingerprint") is { Length: > 0 } fingerprint && fingerprint != oldVersion.Fingerprint))
