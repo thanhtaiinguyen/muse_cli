@@ -1,4 +1,4 @@
-using System.Net.Http.Headers;
+﻿using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Muse2Api.Agent;
@@ -101,18 +101,51 @@ public sealed partial class AgentWorkspaceControl
             _activeThinking = null; _activeToolCall = null; _activeAssistantCard = null;
             string? pendingAnswer = null;
             ToolCallCard? pendingTool = null;
+            ReviewCard? pendingReviewCard = null;
             foreach (var item in _session.Events)
             {
                 switch (item.Kind)
                 {
                     case "user":
                         pendingTool?.SetResult("error: Lượt trước chưa có kết quả xác minh.", true); pendingTool = null;
+                        pendingReviewCard = null;
                         if (!string.IsNullOrWhiteSpace(pendingAnswer))
                         {
                             _chat.AddAssistantMessage(pendingAnswer, stream: false);
                             pendingAnswer = null;
                         }
                         _chat.AddUserMessage(item.Text);
+                        break;
+                    case "review_switch":
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer))
+                        {
+                            _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                            pendingAnswer = null;
+                        }
+                        pendingReviewCard = _chat.AddReviewCard("Đang đọc lại mã nguồn để thẩm định…", "reviewing");
+                        break;
+                    case "review_verdict":
+                        if (!string.IsNullOrWhiteSpace(pendingAnswer))
+                        {
+                            _chat.AddAssistantMessage(pendingAnswer, stream: false);
+                            pendingAnswer = null;
+                        }
+                        List<ReviewFinding>? loadedFindings = null;
+                        if (!string.IsNullOrWhiteSpace(item.Path))
+                        {
+                            try { loadedFindings = System.Text.Json.JsonSerializer.Deserialize<List<ReviewFinding>>(item.Path); } catch { }
+                        }
+                        loadedFindings ??= _session.Review?.Findings;
+                        if (pendingReviewCard is not null)
+                        {
+                            pendingReviewCard.SetVerdict(item.Tool ?? "reviewing", item.Text, loadedFindings);
+                            pendingReviewCard = null;
+                        }
+                        else
+                        {
+                            var card = _chat.AddReviewCard(item.Text, item.Tool ?? "reviewing");
+                            card.SetVerdict(item.Tool ?? "reviewing", item.Text, loadedFindings);
+                        }
                         break;
                     case "tool_start":
                         if (!string.IsNullOrWhiteSpace(pendingAnswer))
@@ -516,17 +549,24 @@ public sealed partial class AgentWorkspaceControl
                     else _activeThinking.AddThought(item.Text);
                     break;
                 case "review_switch":
+                    ShowPendingAnswer();
                     AppendConsole("\n🔍 " + item.Text + "\n");
                     _state.Text = "Phản biện dự án: Đang đọc lại mã nguồn để thẩm định…";
                     _activeReviewCard = _chat.AddReviewCard("Đang đọc lại mã nguồn và đối chiếu tiêu chí chất lượng…", "reviewing");
                     break;
                 case "review_verdict":
+                    ShowPendingAnswer();
                     AppendConsole("\n🔍 " + item.Text + "\n");
                     _state.Text = item.Text;
+                    List<ReviewFinding>? verdictFindings = null;
+                    if (!string.IsNullOrWhiteSpace(item.Path))
+                    {
+                        try { verdictFindings = System.Text.Json.JsonSerializer.Deserialize<List<ReviewFinding>>(item.Path); } catch { }
+                    }
+                    verdictFindings ??= _session?.Review?.Findings;
                     if (_activeReviewCard is null)
                         _activeReviewCard = _chat.AddReviewCard(item.Text, item.Tool ?? "reviewing");
-                    else
-                        _activeReviewCard.SetVerdict(item.Tool ?? "reviewing", item.Text, _session?.Review?.Findings);
+                    _activeReviewCard.SetVerdict(item.Tool ?? "reviewing", item.Text, verdictFindings);
                     break;
                 case "context_compacted":
                     AppendConsole(item.Text + "\n");

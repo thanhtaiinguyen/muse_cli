@@ -1,4 +1,4 @@
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 using System.Globalization;
 using System.Text;
 
@@ -33,9 +33,9 @@ public static class LocalTaskIntent
         if (Regex.IsMatch(text, @"\b(?:toi|minh) muon (?:phan cai dat|giao dien|theme|dark|light)\b")) result |= LocalWork.Edit;
         if (RequestsCommand(text)) result |= LocalWork.Command;
         if (Regex.IsMatch(text, @"^(?:hay |ban )?(?:thuc hien|lam)(?: luon| di| ngay| giup| cho minh| cho toi)+[.! ]*$")) result |= LocalWork.Edit;
-        if (Regex.IsMatch(text, @"\b(dieu khien (?:man hinh|cua so)|kiem thu giao dien|test ui|test giao dien|click|bam nut|chup (?:man hinh|cua so))\b")) result |= LocalWork.Computer;
-        if (Regex.IsMatch(text, @"\b(kiem thu giao dien|test ui|test giao dien)\b")) result |= LocalWork.ComputerAssert;
-        if (Regex.IsMatch(text, @"\bchup (?:man hinh|cua so)\b")) result |= LocalWork.ComputerScreenshot;
+        if (Regex.IsMatch(text, @"\b(dieu khien (?:man hinh|cua so)|kiem thu giao dien|test ui|test giao dien|click|bam nut|chup (?:man hinh|cua so)|render 3d|game 3d|app 3d|giao dien (?:3d|app)|ung dung (?:3d|desktop)|electron|app chu khong phai (?:la )?web)\b")) result |= LocalWork.Computer;
+        if (Regex.IsMatch(text, @"\b(kiem thu giao dien|test ui|test giao dien|render 3d|game 3d|app 3d|giao dien (?:3d|app)|ung dung (?:3d|desktop)|electron|app chu khong phai (?:la )?web)\b")) result |= LocalWork.ComputerAssert;
+        if (Regex.IsMatch(text, @"\b(chup (?:man hinh|cua so)|render 3d|game 3d|app 3d|giao dien (?:3d|app)|ung dung (?:3d|desktop)|electron|app chu khong phai (?:la )?web)\b")) result |= LocalWork.ComputerScreenshot;
         if (Regex.IsMatch(text, @"\b(click|bam nut)\b")) result |= LocalWork.ComputerClick;
         if (Regex.IsMatch(text, @"\b(cuon (?:xuong|len|sang|trai|phai)|keo tha|bam (?:chuot phai|dup)|nhap dup|doc (?:giao dien|man hinh|cua so)|(?:nhap|dien|go)\b[^\n.!?]{0,100}\b(?:vao o|textbox|truong nhap))\b")) result |= LocalWork.Computer;
         if (Regex.IsMatch(text, @"\b(?:keo tha|cuon (?:xuong|len|sang|trai|phai))\b")) result |= LocalWork.ComputerInteract;
@@ -48,6 +48,7 @@ public static class LocalTaskIntent
             // work. Likewise "chạy test UI" need not invoke a shell command.
             var explicitProjectRead = Regex.IsMatch(text, @"\b(?:doc|xem|read|inspect|tim|kiem tra)\b[^\n!?]{0,60}\b(?:file|tep|du an|project|ma nguon|code|thu muc|repository)\b")
                 || Regex.IsMatch(text, @"\b(?:doc|read)\b[^\n!?]{0,60}\.[a-z0-9]{1,8}\b");
+            if (!explicitProjectRead && !Regex.IsMatch(text, @"\b(render 3d|game 3d|ung dung desktop|electron|app chu khong phai)\b")) result &= ~LocalWork.Read;
             if (!explicitProjectRead) result &= ~LocalWork.Read;
             if (!Regex.IsMatch(text, @"\b(?:liet ke (?:file|tep|thu muc)|list files|list directory)\b")) result &= ~LocalWork.Browse;
             if (Regex.IsMatch(text, @"\b(?:kiem thu giao dien|test ui|test giao dien)\b")

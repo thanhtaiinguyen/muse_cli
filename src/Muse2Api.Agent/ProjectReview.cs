@@ -13,7 +13,9 @@ public sealed class ProjectReview
     public string CandidateSummary { get; set; } = "";
     public string ReviewSummary { get; set; } = "";
     public int Revision { get; set; }
+    public int Operations { get; set; }
     public int LastRejectedRevision { get; set; } = -1;
+    public int LastRejectedOperations { get; set; } = -1;
     public string LastRejectedSignature { get; set; } = "";
     [System.Text.Json.Serialization.JsonIgnore] public bool FreshRead { get; private set; }
     public bool IsReviewer => Phase == "reviewer";
@@ -44,6 +46,7 @@ public sealed class ProjectReview
     public void Record(ToolCall call, string result, bool changed)
     {
         if (changed) Revision++;
+        if (!IsReviewer) Operations++;
         if (IsReviewer && !ToolOutcome.IsFailure(result) && call.Name is "read_file" or "read_files" or "git_diff") FreshRead = true;
     }
     public JsonObject Snapshot() => new()
@@ -82,8 +85,8 @@ public sealed class ProjectReview
         if (report is null)
         {
             var lower = text.ToLowerInvariant();
-            if (Regex.IsMatch(lower, @"(chap thuan|phe duyet|dong y|approved|dat yeu cau|khong co loi|chuan xac|hoan thanh tot)")
-                && !Regex.IsMatch(lower, @"(can sua|yeu cau sua|loi|chua dat|that bai|changes_requested)"))
+            if (Regex.IsMatch(lower, @" (chap thuan|phe duyet|dong y|approved|dat yeu cau|khong co loi|chuan xac|hoan thanh tot) ")
+                && !Regex.IsMatch(lower, @" (can sua|yeu cau sua|loi|chua dat|that bai|changes_requested) "))
             {
                 report = new JsonObject
                 {
@@ -99,6 +102,12 @@ public sealed class ProjectReview
         var verdict = report["verdict"]?.ToString();
         if (verdict is not ("approved" or "changes_requested") || verdict == "approved" && findings.Count != 0 || verdict == "changes_requested" && findings.Count == 0)
             throw new InvalidOperationException("Kết luận phản biện không khớp danh sách vấn đề.");
+        if (verdict == "approved")
+        {
+            var lowerText = text.ToLowerInvariant();
+            if (Regex.IsMatch(lowerText, @"\b(chua duoc kiem chung|chua co bang chung|chua dat|tro ngai ngoai ma nguon|chua duoc chung nhan|van chua|that bai)\b"))
+                throw new InvalidOperationException("Phản biện còn trở ngại hoặc kiểm chứng chưa đạt thì không thể chấp thuận; hãy dùng changes_requested.");
+        }
         var parsed = new List<ReviewFinding>();
         foreach (var finding in findings)
         {
@@ -120,9 +129,9 @@ public sealed class ProjectReview
         if (verdict == "changes_requested")
         {
             var signature = System.Text.Json.JsonSerializer.Serialize(parsed);
-            if (LastRejectedRevision == Revision)
+            if (LastRejectedRevision == Revision && LastRejectedOperations == Operations)
                 throw new InvalidOperationException("Phản biện lặp lại cùng vấn đề mà mã chưa thay đổi; cần làm rõ trở ngại trước khi chạy tiếp.");
-            LastRejectedRevision = Revision; LastRejectedSignature = signature;
+            LastRejectedRevision = Revision; LastRejectedOperations = Operations; LastRejectedSignature = signature;
         }
         Findings = parsed; ReviewSummary = Clip(summary, 2000); Phase = verdict == "approved" ? "accepted" : "coder";
         return verdict;

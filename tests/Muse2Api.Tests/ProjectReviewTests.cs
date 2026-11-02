@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 using Muse2Api.Agent;
 
 namespace Muse2Api.Tests;
@@ -32,7 +32,7 @@ public class ProjectReviewTests
         Assert.Equal("accepted",loop.Review!.Phase);Assert.Equal(2,loop.Review.Round);
         Assert.DoesNotContain(events,e=>e.Kind=="tool_start"&&e.Path=="rogue.txt");
         Assert.Single(events.Where(e=>e.Kind=="completed"));
-        Assert.Contains(events,e=>e.Kind=="assistant"&&e.Text.Contains("Phản biện dự án:"));
+        Assert.Contains(events,e=>e.Kind=="review_verdict"&&e.Tool=="approved");
     }
 
     [Fact]
@@ -139,5 +139,37 @@ public class ProjectReviewTests
         Assert.Contains(events, e => e.Kind == "review_switch");
         Assert.Contains(events, e => e.Kind == "review_verdict");
         Assert.DoesNotContain(events.TakeWhile(e => e.Kind != "review_verdict"), e => e.Kind == "waiting_input");
+    }
+    [Fact]
+    public async Task ReviewerApprovedRejectedWhenGoalVerificationMissing()
+    {
+        using var dir = new TempDirectory(); File.WriteAllText(dir.File("app.txt"), "init"); var step = 0; var events = new List<AgentEvent>();
+        var loop = new AgentLoop(new ToolExecutor(dir.Root), (messages, _) =>
+        {
+            var current = step++;
+            return Task.FromResult(current switch
+            {
+                0 => Actions(Read(), Write("edited")),
+                1 => ("Đã sửa code.", new List<ToolCall>()),
+                2 => Actions(Read()),
+                3 => (Approved, new List<ToolCall>()), // Reviewer tries to approve, but verification is missing!
+                _ => ("Cần thêm thông tin?", new List<ToolCall>())
+            });
+        }, (_, _) => Task.FromResult(true), events.Add) { ProjectReviewEnabled = true };
+
+        await loop.RunAsync("/goal Thêm tính năng và kiểm thử tự động");
+        Assert.Contains(events, e => e.Kind == "review_verdict" && e.Tool == "changes_requested");
+        Assert.Contains(events, e => e.Kind == "review" && e.Text.Contains("Phản biện chưa thể chấp thuận vì goal chưa hoàn thành kiểm chứng"));
+    }
+
+    [Fact]
+    public void WorkspaceWithElectronEnablesUiVerification()
+    {
+        using var dir = new TempDirectory();
+        File.WriteAllText(dir.File("package.json"), "{\"name\":\"app\",\"dependencies\":{\"electron\":\"^28.0.0\"}}");
+        var prompt = "phát triển thêm giao diện app 3D";
+        var req = LocalTaskIntent.Required(prompt);
+        Assert.True((req & LocalTaskIntent.ComputerWork) != 0);
+        Assert.True(AgentLoop.WorkspaceRequiresDesktopUi(dir.Root, prompt));
     }
 }

@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 
 namespace Muse2Api.Agent;
 
@@ -82,7 +82,7 @@ public sealed class AgentLoop
                 if (goalFollowUp && !WorkflowPolicy.IsContinue(userPrompt)) Goal.AddFollowUp(userPrompt);
                 Goal.Status = "running"; Goal.Summary = "Đang xây dựng và kiểm chứng mục tiêu.";
                 Goal.PendingQuestion = null;
-                var requiresUi = (LocalTaskIntent.Required(Goal.Objective) & LocalTaskIntent.ComputerWork) != 0;
+                var requiresUi = (LocalTaskIntent.Required(Goal.Objective) & LocalTaskIntent.ComputerWork) != 0 || WorkspaceRequiresDesktopUi(_tools.Root, Goal.Objective);
                 verification = new(requiresUi);
                 prompt = Goal.TaskPrompt;
                 _observe(new("goal", "Đang theo đuổi mục tiêu: " + prompt));
@@ -245,8 +245,9 @@ public sealed class AgentLoop
                         try
                         {
                             var decision = review.ApplyDecision(text, _tools.Root);
+                            var findingsJson = System.Text.Json.JsonSerializer.Serialize(review.Findings);
                             _observe(new("review", decision == "approved" ? "Phản biện đã chấp thuận sau khi đọc mã hiện tại." : $"Phản biện yêu cầu sửa {review.Findings.Count} vấn đề. Đang chuyển lại cho vai trò viết mã…"));
-                            _observe(new("review_verdict", decision == "approved" ? "Phản biện dự án đã chấp thuận sau khi kiểm tra mã nguồn." : $"Phản biện yêu cầu sửa {review.Findings.Count} vấn đề: {review.ReviewSummary}", decision));
+                            _observe(new("review_verdict", review.ReviewSummary, decision, findingsJson));
                             if (decision == "changes_requested")
                             {
                                 protocolRetries = scopeRetries = 0;
@@ -256,11 +257,11 @@ public sealed class AgentLoop
                             if (verification is not null && verification.Missing.Count > 0)
                             {
                                 review.Phase = "coder";
-                                messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Review approved, but goal verification is incomplete. Continue CODER checks: " + string.Join("; ", verification.Missing) });
+                                _observe(new("review", "Phản biện chưa thể chấp thuận vì goal chưa hoàn thành kiểm chứng: " + string.Join("; ", verification.Missing)));
+                                _observe(new("review_verdict", "Chưa hoàn tất kiểm chứng goal (" + string.Join("; ", verification.Missing) + "). Đang chuyển lại cho vai trò viết mã…", "changes_requested", findingsJson));
+                                messages.Add(new() { ["role"] = "user", ["content"] = "LOCAL EXECUTOR: Goal verification is incomplete: " + string.Join("; ", verification.Missing) + ". You cannot mark complete. Continue CODER checks: " + string.Join("; ", verification.Missing) });
                                 continue;
                             }
-                            _observe(new("assistant", review.CandidateSummary + "\n\nPhản biện dự án: " + review.ReviewSummary
-                                + (verification?.LastTestSummary is { Length: > 0 } testSummary ? "\n" + testSummary : "")));
                             _observe(new("completed", "Đã hoàn tất viết mã, kiểm chứng và phản biện dự án.")); return true;
                         }
                         catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or System.Text.Json.JsonException or FormatException)
@@ -284,6 +285,8 @@ public sealed class AgentLoop
                         if (review.Phase == "coder")
                         {
                             review.StartReview(visible); protocolRetries = scopeRetries = 0;
+                            if (!string.IsNullOrWhiteSpace(visible))
+                                _observe(new("assistant", visible));
                             messages[^1]["content"] = "[Unverified reply: awaiting independent project review.]\n" + visible;
                             messages.Add(new()
                             {
@@ -530,5 +533,28 @@ public sealed class AgentLoop
             copy["content"] = string.Join("\n", parts.OfType<JsonObject>().Select(p => p["type"]?.ToString() == "image_url"
                 ? "[An image was attached in this turn. Reattach it if the original image is needed again.]" : p["text"]?.ToString() ?? ""));
         return copy;
+    }
+    public static bool WorkspaceRequiresDesktopUi(string root, string objective)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return false;
+        if (WorkflowPolicy.IsReadOnly(objective)) return false;
+        try
+        {
+            var packageJson = Path.Combine(root, "package.json");
+            if (File.Exists(packageJson))
+            {
+                var pkg = File.ReadAllText(packageJson);
+                if (pkg.Contains("\"electron\"", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            var planFile = Path.Combine(root, "KE-HOACH.md");
+            if (File.Exists(planFile))
+            {
+                var plan = File.ReadAllText(planFile);
+                if (plan.Contains("Electron", StringComparison.OrdinalIgnoreCase) || plan.Contains("UI thật", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch { }
+        return false;
     }
 }
