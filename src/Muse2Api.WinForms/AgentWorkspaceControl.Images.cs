@@ -46,6 +46,7 @@ public sealed partial class AgentWorkspaceControl
         _conversation.RowStyles[2].Height = LogicalToDeviceUnits(140) + extra;
         _imageStrip.Visible = extra > 0;
         _imageStrip.ResumeLayout();
+        UpdateInputActions();
     }
 
     private void ClearImageDraft() { _imageDraft.Clear(); RefreshImageDraft(); }

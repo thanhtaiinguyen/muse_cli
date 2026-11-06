@@ -256,18 +256,19 @@ public sealed partial class AgentWorkspaceControl
         if (_busy || _tools is null || _editorPath is null) return;
         try
         {
-            var content = _editor.Text.Replace("\r\n", "\n");
+            var displaySnapshot = _editor.Text;
+            var content = displaySnapshot.Replace("\r\n", "\n");
             if (_editorBaseline?.Contains("\r\n") == true) content = content.Replace("\n", "\r\n");
             var prepared = await _tools.PrepareAsync(new("write_file", new() { ["path"] = _editorPath, ["content"] = content }));
             if (prepared.OriginalText != _editorBaseline) throw new InvalidOperationException("File trên đĩa đã thay đổi. Mở lại file trước khi lưu.");
             var result = await _tools.ExecutePreparedAsync(prepared);
             if (result.StartsWith("error:")) throw new InvalidOperationException(result);
             _editorBaseline = content;
-            _editorDisplayBaseline = _editor.Text;
-            _dirty = false;
+            _editorDisplayBaseline = displaySnapshot;
+            _dirty = _editor.Text != _editorDisplayBaseline;
             UpdateEditorTitle(); RefreshChanges();
             await NoteWorkspaceChange($"The user saved {_editorPath} in the editor. Re-read it before relying on earlier contents.");
-            _state.Text = "Đã lưu " + _editorPath;
+            _state.Text = "Đã lưu " + _editorPath + (_dirty ? " · Còn nội dung mới chưa lưu." : "");
         }
         catch (Exception ex) { _state.Text = ex.Message; }
     }
@@ -302,6 +303,19 @@ public sealed partial class AgentWorkspaceControl
             await NoteWorkspaceChange($"The user reverted {change.Path}. Re-read it before relying on earlier contents.");
         }
         catch (Exception ex) { _state.Text = ex.Message; }
+    }
+
+    private bool HasPrompt => !string.IsNullOrWhiteSpace(_prompt.Text) || _imageDraft.Count > 0;
+
+    private Task SendPrompt() => HasPrompt ? StartOperation(RunTurn) : Task.CompletedTask;
+
+    private Task StartManualCommand() => !string.IsNullOrWhiteSpace(_command.Text)
+        ? StartOperation(RunManualCommand) : Task.CompletedTask;
+
+    private void UpdateInputActions()
+    {
+        _send.Enabled = !_busy && HasPrompt;
+        _run.Enabled = !_busy && !string.IsNullOrWhiteSpace(_command.Text);
     }
 
     private async Task StartOperation(Func<CancellationToken, Task> operation)
@@ -517,11 +531,12 @@ public sealed partial class AgentWorkspaceControl
         _activityFrame = 0;
         if (busy) { _activityGlyph.Text = "◐"; _state.Text = "Đang suy nghĩ…"; }
         _stop.Enabled = busy;
-        foreach (var control in new Control[] { _choose, _welcomeProject, _models, _shell, _terminalShell, _permissions, _sessions, _new, _save, _undo, _run, _computerButton, _backgroundCommand }) control.Enabled = !busy;
+        foreach (var control in new Control[] { _choose, _welcomeProject, _models, _shell, _terminalShell, _permissions, _sessions, _new, _save, _undo, _computerButton, _backgroundCommand }) control.Enabled = !busy;
         _loginButton.Enabled = !busy && !_preparing;
         _welcomeConnect.Enabled = !_connected && !busy && !_preparing;
         _stop.Visible = busy;
         _editor.ReadOnly = busy;
+        UpdateInputActions();
     }
 
     public async Task StopAsync()

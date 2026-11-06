@@ -91,11 +91,14 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _welcomeConnect.Click += async (_, _) => { if (!_connected && !_preparing) await _login(); };
         _new.Click += async (_, _) => { if (!_busy) { if (_tools is null) await PickWorkspace(); NewSession(); await RefreshSessions(); } };
         _loginButton.Click += async (_, _) => { if (!_busy && !_preparing) { if (_connected) _settings(); else await _login(); } };
-        _send.Click += async (_, _) => await StartOperation(RunTurn);
+        _send.Click += async (_, _) => await SendPrompt();
+        _prompt.TextChanged += (_, _) => UpdateInputActions();
+        _command.TextChanged += (_, _) => UpdateInputActions();
+        UpdateInputActions();
         _prompt.PasteImage = PasteChatImages;
         _pasteImage.Click += (_, _) => { if (!PasteChatImages()) _state.Text = "Chụp màn hình rồi nhấn Ctrl+V trong ô chat để đính kèm ảnh."; };
         _stop.Click += (_, _) => { _state.Text = "Đang dừng thao tác…"; _cancel?.Cancel(); DisableComputer(); };
-        _run.Click += async (_, _) => await StartOperation(RunManualCommand);
+        _run.Click += async (_, _) => await StartManualCommand();
         _save.Click += async (_, _) => await SaveEditor();
         _undo.Click += async (_, _) => await UndoSelected();
         _filesButton.Click += async (_, _) => { if (_tools is null) await PickWorkspace(); if (_tools is not null) ToggleDrawer(0); };
@@ -111,9 +114,9 @@ public sealed partial class AgentWorkspaceControl : UserControl
         _editor.KeyDown += async (_, e) => { if (e.Control && e.KeyCode == Keys.S) { e.SuppressKeyPress = true; await SaveEditor(); } };
         _prompt.KeyDown += async (_, e) =>
         {
-            if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; await StartOperation(RunTurn); }
+            if (e.KeyCode == Keys.Enter && !e.Shift) { e.SuppressKeyPress = true; await SendPrompt(); }
         };
-        _command.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await StartOperation(RunManualCommand); } };
+        _command.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await StartManualCommand(); } };
         Load += async (_, _) => await RestoreWorkspace();
         _tips.SetToolTip(_prompt, "Enter để gửi · Shift+Enter để xuống dòng · Ctrl+V để dán ảnh");
         _tips.SetToolTip(_choose, "Chọn thư mục dự án trên máy của bạn");
