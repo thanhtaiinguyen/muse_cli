@@ -19,6 +19,7 @@ static class Program
             Require(!message.Contains("hết lượt"),"Conversation/readback error was mislabeled as quota exhaustion");
         }
         Console.WriteLine("PASS: old-chat busy/owner/unavailable/readback failures have distinct Vietnamese explanations");
+        await CheckEmptySubmissions();
         await CheckPreviewIsolation();
         CheckComputerPicker();
         await CheckUpdateSettings();
@@ -43,6 +44,61 @@ static class Program
         Require(Math.Abs(first.Top-(16+viewport.AutoScrollPosition.Y))<3,"Reading history content shifted to the top");
         Require(Application.OpenForms.Count==0,"Visible window opened");
         Console.WriteLine("PASS: second turn/tool updates remain at bottom; user history position preserved; no visible windows");
+    }
+
+    static async Task CheckEmptySubmissions()
+    {
+        var previous=Environment.GetEnvironmentVariable("MUSE_DESKTOP_PROFILE_ROOT");
+        var profile=Path.Combine(Path.GetTempPath(),"muse-input-check-"+Guid.NewGuid().ToString("N"));
+        try
+        {
+            Environment.SetEnvironmentVariable("MUSE_DESKTOP_PROFILE_ROOT",profile);
+            var connections=0;
+            using var workspace=new AgentWorkspaceControl(
+                ()=>throw new Exception("Empty submission requested a connection"),
+                ()=>throw new Exception("Empty submission requested login"),
+                ()=>{connections++;return Task.FromResult(false);},()=>{});
+            workspace.CreateControl();
+            var prompt=(TextBox)Get(workspace,"_prompt");
+            var command=(TextBox)Get(workspace,"_command");
+            var send=(Control)Get(workspace,"_send");
+            var run=(Control)Get(workspace,"_run");
+            var state=(Label)Get(workspace,"_state");
+            state.Text="Sẵn sàng";
+            foreach(var blank in new[]{""," ","\r\n\t"})
+            {
+                prompt.Text=blank;command.Text=blank;
+                Require(!send.Enabled&&!run.Enabled,"Empty/whitespace input left an action enabled");
+                await (Task)workspace.GetType().GetMethod("SendPrompt",Private)!.Invoke(workspace,null)!;
+                await (Task)workspace.GetType().GetMethod("StartManualCommand",Private)!.Invoke(workspace,null)!;
+                Require(Get(workspace,"_tools") is null&&Get(workspace,"_session") is null,"Empty submission initialized a project/session");
+                Require(Get(workspace,"_activeTask") is null&&!(bool)Get(workspace,"_startingOperation"),"Empty submission started work");
+                Require((int)Get(workspace,"_sessionLoadVersion")==0,"Empty submission invalidated history loading");
+                Require(state.Text=="Sẵn sàng"&&connections==0&&!Directory.Exists(profile),"Empty submission changed status, connected or wrote data");
+            }
+            prompt.Text="Đọc dự án";command.Text="echo OK";
+            Require(send.Enabled&&run.Enabled,"Non-empty input did not enable actions");
+            workspace.GetType().GetMethod("SetBusy",Private)!.Invoke(workspace,new object[]{true});
+            Require(!send.Enabled&&!run.Enabled,"Busy workspace allowed a duplicate action");
+            workspace.GetType().GetMethod("SetBusy",Private)!.Invoke(workspace,new object[]{false});
+            Require(send.Enabled&&run.Enabled,"Actions did not recover after work finished");
+            prompt.Clear();command.Clear();
+            using var bitmap=new Bitmap(8,8);
+            var data=new DataObject();data.SetData(DataFormats.Bitmap,bitmap);
+            Require((bool)workspace.GetType().GetMethod("AddChatImages",Private)!.Invoke(workspace,new object[]{data})!,"Image fixture was not accepted");
+            Require(send.Enabled&&!run.Enabled,"Image-only message cannot be sent");
+            var strip=(FlowLayoutPanel)Get(workspace,"_imageStrip");
+            var remove=strip.Controls[0].Controls.Cast<Control>().Single(c=>c.AccessibleName?.StartsWith("Bỏ ảnh ")==true);
+            remove.GetType().GetMethod("OnClick",Private)!.Invoke(remove,new object[]{EventArgs.Empty});
+            Require(!send.Enabled&&strip.Controls.Count==0,"Removing the last image left empty Send enabled");
+            Require(Application.OpenForms.Count==0,"Input checks opened a visible window");
+            Console.WriteLine("PASS: blank chat/terminal submissions are side-effect free; text/image/busy action states update; no visible windows");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("MUSE_DESKTOP_PROFILE_ROOT",previous);
+            if(Directory.Exists(profile))Directory.Delete(profile,true);
+        }
     }
 
     static void CheckConnectPanel()
