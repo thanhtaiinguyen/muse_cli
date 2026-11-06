@@ -304,6 +304,19 @@ public sealed partial class AgentWorkspaceControl
         catch (Exception ex) { _state.Text = ex.Message; }
     }
 
+    private bool HasPrompt => !string.IsNullOrWhiteSpace(_prompt.Text) || _imageDraft.Count > 0;
+
+    private Task SendPrompt() => HasPrompt ? StartOperation(RunTurn) : Task.CompletedTask;
+
+    private Task StartManualCommand() => !string.IsNullOrWhiteSpace(_command.Text)
+        ? StartOperation(RunManualCommand) : Task.CompletedTask;
+
+    private void UpdateInputActions()
+    {
+        _send.Enabled = !_busy && HasPrompt;
+        _run.Enabled = !_busy && !string.IsNullOrWhiteSpace(_command.Text);
+    }
+
     private async Task StartOperation(Func<CancellationToken, Task> operation)
     {
         if (_busy || _startingOperation) return;
@@ -517,11 +530,12 @@ public sealed partial class AgentWorkspaceControl
         _activityFrame = 0;
         if (busy) { _activityGlyph.Text = "◐"; _state.Text = "Đang suy nghĩ…"; }
         _stop.Enabled = busy;
-        foreach (var control in new Control[] { _choose, _welcomeProject, _models, _shell, _terminalShell, _permissions, _sessions, _new, _save, _undo, _run, _computerButton, _backgroundCommand }) control.Enabled = !busy;
+        foreach (var control in new Control[] { _choose, _welcomeProject, _models, _shell, _terminalShell, _permissions, _sessions, _new, _save, _undo, _computerButton, _backgroundCommand }) control.Enabled = !busy;
         _loginButton.Enabled = !busy && !_preparing;
         _welcomeConnect.Enabled = !_connected && !busy && !_preparing;
         _stop.Visible = busy;
         _editor.ReadOnly = busy;
+        UpdateInputActions();
     }
 
     public async Task StopAsync()
